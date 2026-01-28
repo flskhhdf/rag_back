@@ -39,6 +39,17 @@ class RAGConfig:
     QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
     QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 
+    # Document Parsing (Docling)
+    DOCLING_IMAGE_SCALE = float(os.getenv("DOCLING_IMAGE_SCALE", "2.0"))
+    DOCLING_OCR_THRESHOLD = float(os.getenv("DOCLING_OCR_THRESHOLD", "0.4"))
+    DOCLING_VISION_MODEL = os.getenv("DOCLING_VISION_MODEL", "qwen3-vl:latest")
+    DOCLING_LLM_MODEL = os.getenv("DOCLING_LLM_MODEL", "qwen2.5:14b")
+
+    # Chunking
+    CHUNK_MAX_TOKENS = int(os.getenv("CHUNK_MAX_TOKENS", "400"))
+    CHUNK_MIN_TOKENS = int(os.getenv("CHUNK_MIN_TOKENS", "100"))
+    CHUNK_OVERLAP_SENTENCES = int(os.getenv("CHUNK_OVERLAP_SENTENCES", "2"))
+
 
 # =============================================================================
 # 프롬프트 템플릿

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any, Dict
 from datetime import datetime
 
 
@@ -8,6 +8,7 @@ class PDFUploadResponse(BaseModel):
     filename: str
     chunk_count: int
     message: str
+    task_id: Optional[str] = None  # Celery task ID (비동기 처리용)
 
 
 class PDFInfo(BaseModel):
@@ -99,3 +100,17 @@ class SaveChatRequest(BaseModel):
     role: str
     content: str
     metadata: Optional[dict] = None
+
+
+# ===== Task Schemas =====
+
+class TaskStatusResponse(BaseModel):
+    """Celery 작업 상태 응답"""
+    task_id: str
+    state: str  # PENDING, PROCESSING, SUCCESS, FAILURE, RETRY
+    status: str
+    progress: int  # 0-100
+    filename: Optional[str] = None
+    chunk_count: Optional[int] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None

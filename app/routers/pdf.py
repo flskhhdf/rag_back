@@ -1,5 +1,6 @@
 import uuid
 import shutil
+import base64
 from pathlib import Path
 from urllib.parse import unquote
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
@@ -7,7 +8,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from app.models.schemas import PDFUploadResponse, PDFListResponse, PDFInfo
 from app.services.database import qdrant as qdrant_service
 from app.services.database import mysql as mysql_service
-from app.services.document import process_pdf_to_chunks, IntegratedParserConfig
+from app.tasks import process_pdf_task, calculate_priority_from_size
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ async def create_pdf(
     generate_image_description: bool = Form(default=False)
 ):
     """
-    PDF 업로드 및 파일 시스템에 저장
+    PDF 업로드 및 비동기 처리
 
     Args:
         file: PDF 파일
@@ -32,19 +33,22 @@ async def create_pdf(
         generate_image_description: 이미지 description 생성 여부 (기본값: False)
 
     저장 구조: ./storage/{user_id}/{file_name}/{file}
+
+    Note: PDF 처리는 항상 백그라운드에서 비동기로 처리됩니다.
     """
     # URL 인코딩된 파일명 디코딩 (한글 파일명 지원)
     original_filename = unquote(file.filename) if file.filename else file.filename
-    
+
     if not original_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
 
     content = await file.read()
+    file_size = len(content)
     pdf_id = str(uuid.uuid4())
 
     # 파일 해시 계산 (중복 체크용)
     file_hash = mysql_service.calculate_file_hash(content)
-    
+
     # 중복 파일 체크
     existing_file = mysql_service.get_file_by_hash(file_hash)
     if existing_file:
@@ -57,7 +61,6 @@ async def create_pdf(
 
     # PDF 파일명에서 확장자 제거
     pdf_name = Path(original_filename).stem
-    extend = Path(original_filename).suffix.lstrip(".")
 
     # 디렉토리 구조 생성: storage/{user_id}/{pdf_name}/
     user_dir = BASE_STORAGE_DIR / user_id
@@ -72,83 +75,34 @@ async def create_pdf(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF 파일 저장 실패: {str(e)}")
 
-    # Integrated Parser로 PDF 처리 (OCR 자동 감지 + 고급 청킹)
-    output_path = pdf_dir / "docling_output"
-    output_path.mkdir(parents=True, exist_ok=True)
+    # 파일 크기 기반 우선순위 계산
+    priority = calculate_priority_from_size(file_size)
 
-    try:
-        # 설정: OCR 자동 감지, VLM은 옵션에 따라 활성화
-        config = IntegratedParserConfig(
-            auto_detect_ocr=True,  # OCR 자동 감지
-            enable_image_description=generate_image_description,
-            enable_table_description=generate_image_description,
-            max_chars=1500,  # 청크 크기 (기존 512 → 1500)
-            overlap_sentences=2,  # 문장 오버랩
-        )
+    # Base64 인코딩 (Celery 전달용)
+    content_b64 = base64.b64encode(content).decode('utf-8')
 
-        chunks_data, metadata = process_pdf_to_chunks(
-            file_content=content,
-            filename=original_filename,
-            output_dir=output_path,
-            source_id=pdf_id,
-            config=config,
-        )
-
-        table_count = metadata['table_count']
-        picture_count = metadata['picture_count']
-
-    except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        error_msg = str(e)
-        error_type = type(e).__name__
-        
-        # 디버깅용 로그
-        logger.error(f"PDF Error - File: {original_filename}, Type: {error_type}, Message: {error_msg}")
-        
-        # 암호화된 PDF 파일 체크
-        is_pwd_error = "password" in error_msg.lower() or "pdfium" in error_msg.lower() or (error_type == "ConversionError" and "not valid" in error_msg.lower())
-        logger.error(f"Password check: {is_pwd_error}")
-        
-        if is_pwd_error:
-            raise HTTPException(
-                status_code=400,
-                detail=f"암호화된 PDF 파일입니다. 암호화를 해제한 후 다시 업로드해주세요. (파일명: {original_filename})"
-            )
-        
-        # 기타 처리 에러
-        raise HTTPException(status_code=500, detail=f"PDF 처리 실패: {error_msg}")
-
-    if not chunks_data:
-        raise HTTPException(status_code=400, detail="PDF에서 청크를 생성할 수 없습니다.")
-
-    # Qdrant에 저장 (임베딩은 VectorStore가 자동 생성)
-    chunk_count = qdrant_service.upsert_chunks(
-        pdf_id=pdf_id,
-        filename=original_filename,
-        chunks_data=chunks_data,
+    # Celery 작업 생성 (비동기 처리)
+    task = process_pdf_task.apply_async(
+        args=[
+            pdf_id,
+            content_b64,
+            original_filename,
+            str(pdf_file_path),
+            file_hash,
+            user_id,
+            notebook_id,
+            generate_image_description,
+        ],
+        priority=priority,
+        queue='pdf_processing',
     )
-
-    # Qdrant upsert 성공 후 MySQL에 파일 메타데이터 저장
-    mysql_service.create_file_info(
-        file_id=pdf_id,
-        file_name=original_filename,
-        file_path=str(pdf_file_path),
-        file_hash=file_hash,
-        uploaded_by=user_id,
-        extend=extend,
-    )
-
-    # 노트북에 파일 연결
-    if notebook_id:
-        mysql_service.link_file_to_notebook(notebook_id, pdf_id)
 
     return PDFUploadResponse(
         pdf_id=pdf_id,
         filename=original_filename,
-        chunk_count=chunk_count,
-        message=f"PDF가 성공적으로 업로드되었습니다. (저장 위치: {pdf_dir}, 테이블: {table_count}, 이미지: {picture_count})",
+        chunk_count=0,
+        message=f"PDF 업로드 완료. 백그라운드에서 처리 중입니다. (우선순위: {priority}/9, 파일 크기: {file_size / 1024 / 1024:.2f}MB)",
+        task_id=task.id,
     )
 
 
