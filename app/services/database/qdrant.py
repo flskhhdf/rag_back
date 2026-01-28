@@ -207,27 +207,40 @@ def upsert_chunks(
     ids: List[str] = []
 
     for i, chunk_dict in enumerate(chunks_data):
-        page_content = chunk_dict.get("page_content", "")
+        # ✅ content 또는 page_content 둘 다 지원 (complete_chunker 호환)
+        page_content = chunk_dict.get("page_content") or chunk_dict.get("content", "")
         if not page_content.strip():
             continue
 
-        # 메타데이터 복사
-        metadata = dict(chunk_dict.get("metadata", {}))
-        
-        # upsert.py 스타일: display_content를 raw_text로 변환
-        display_content = metadata.pop("display_content", None) or page_content
-        metadata["raw_text"] = display_content
-        
+        # 메타데이터 가져오기 (두 가지 형식 지원)
+        if "metadata" in chunk_dict:
+            # 형식 1: {page_content, metadata} 구조
+            metadata = dict(chunk_dict.get("metadata", {}))
+        else:
+            # 형식 2: chunk_dict 전체가 메타데이터 (complete_chunker 형식)
+            metadata = {k: v for k, v in chunk_dict.items()
+                       if k not in ["page_content", "content", "content_for_llm"]}
+
+        # content_for_llm을 raw_text로 저장 (LLM 응답 생성용)
+        content_for_llm = chunk_dict.get("content_for_llm")
+        if content_for_llm:
+            metadata["raw_text"] = content_for_llm
+        else:
+            # 기존 방식: display_content를 raw_text로 변환
+            display_content = metadata.pop("display_content", None) or page_content
+            metadata["raw_text"] = display_content
+
         # 추가 필드 (기존 필드 유지)
         metadata["pdf_id"] = pdf_id
         metadata["filename"] = filename
         metadata["chunk_index"] = i
         metadata["uploaded_at"] = datetime.now().isoformat()
         metadata["collection_name"] = collection_name
-        
-        # doc_id 생성 (기존 로직 유지 or metadata에 있으면 사용)
+
+        # doc_id 생성 (우선순위: chunk_id > doc_id > 자동 생성)
         if "doc_id" not in metadata:
-            doc_id = _build_doc_id(pdf_id, i)
+            # chunk_id가 있으면 사용 (complete_chunker), 없으면 자동 생성
+            doc_id = metadata.get("chunk_id") or _build_doc_id(pdf_id, i)
             metadata["doc_id"] = doc_id
         else:
             doc_id = metadata["doc_id"]
