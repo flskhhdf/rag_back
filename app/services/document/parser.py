@@ -194,6 +194,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         min_chunk_tokens: int = None,
         include_descriptions: bool = True,
         embed_with_assets: bool = False,
+
+        # Progress callback
+        progress_callback: Optional[callable] = None,
     ):
         """
         Args:
@@ -256,6 +259,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.min_chunk_tokens = max(0, min_chunk_tokens if min_chunk_tokens is not None else RAGConfig.CHUNK_MIN_TOKENS)
         self.include_descriptions = include_descriptions
         self.embed_with_assets = embed_with_assets
+
+        # Progress callback
+        self.progress_callback = progress_callback
 
         self.logger = logging.getLogger(__name__)
 
@@ -625,6 +631,15 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                             if markdown_table:
                                 self.logger.info(f"🔄 테이블 description 생성 중 [{tbl_idx + 1}/{total_tables}]...")
 
+                                # Progress callback 호출
+                                if self.progress_callback:
+                                    self.progress_callback({
+                                        'status': f'Generating table description [{tbl_idx + 1}/{total_tables}]',
+                                        'progress': 40 + int((tbl_idx / total_tables) * 20),
+                                        'current_table': tbl_idx + 1,
+                                        'total_tables': total_tables,
+                                    })
+
                                 # LLM 요약 생성
                                 desc = self._generate_llm_table_description(markdown_table)
                                 if desc:
@@ -666,6 +681,15 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                             picture_node = doc_dict["pictures"][img_idx]
 
                             self.logger.info(f"🔄 이미지 description 생성 중 [{img_idx + 1 - junk_skipped}/{total_images - len(junk_image_indices)}]...")
+
+                            # Progress callback 호출
+                            if self.progress_callback:
+                                self.progress_callback({
+                                    'status': f'Generating image description [{img_idx + 1 - junk_skipped}/{total_images - len(junk_image_indices)}]',
+                                    'progress': 40 + int((img_idx / total_images) * 20),
+                                    'current_image': img_idx + 1 - junk_skipped,
+                                    'total_images': total_images - len(junk_image_indices),
+                                })
 
                             desc = self._generate_vlm_description(img)
                             if desc:
@@ -1516,7 +1540,8 @@ def process_pdf_to_chunks(
     filename: str,
     output_dir: Path,
     source_id: Optional[str] = None,
-    config: Optional[IntegratedParserConfig] = None
+    config: Optional[IntegratedParserConfig] = None,
+    progress_callback: Optional[callable] = None
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     PDF를 한 번에 처리하여 청크 생성 (Docling Complete → Dual Content Chunks)
@@ -1552,12 +1577,13 @@ def process_pdf_to_chunks(
     if source_id is None:
         source_id = str(uuid.uuid4())
 
-    # DoclingCompleteChunker 인스턴스 생성 (모든 옵션은 내부 기본값 사용)
+    # DoclingChunker 인스턴스 생성 (모든 옵션은 내부 기본값 사용)
     # 고급 모드만 사용자가 선택 가능
-    chunker = DoclingCompleteChunker(
+    chunker = DoclingChunker(
         advanced_mode=(config.enable_image_description or config.enable_table_description),
         enable_image_description=config.enable_image_description,
         enable_table_description=config.enable_table_description,
+        progress_callback=progress_callback,
     )
 
     # PDF를 임시 파일로 저장 (DoclingCompleteChunker가 Path를 받기 때문)
