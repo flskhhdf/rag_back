@@ -9,8 +9,10 @@ class RAGConfig:
     """RAG 파이프라인 설정"""
     
     # Embedding
-    EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:4b")
+    EMBED_TYPE = os.getenv("EMBED_TYPE", "huggingface")  # "ollama" or "huggingface"
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")  # "qwen3-embedding:4b" (ollama) or "BAAI/bge-m3" (huggingface)
     SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
+    OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # For ollama embeddings
     
     # Search
     K_PER_MODALITY = int(os.getenv("K_PER_MODALITY", "20"))
@@ -29,9 +31,9 @@ class RAGConfig:
     # Context Expansion
     NEIGHBOR_EXPAND = int(os.getenv("NEIGHBOR_EXPAND", "1"))
     
-    # LLM
-    OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    LLM_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b")
+    # LLM (vLLM OpenAI-compatible API)
+    VLLM_URL = os.getenv("VLLM_HOST", "http://localhost:8001")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:120b")
     MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
     SUMMARIZE_LANG = os.getenv("SUMMARIZE_LANG", "ko")
     
@@ -43,7 +45,8 @@ class RAGConfig:
     DOCLING_IMAGE_SCALE = float(os.getenv("DOCLING_IMAGE_SCALE", "2.0"))
     DOCLING_OCR_THRESHOLD = float(os.getenv("DOCLING_OCR_THRESHOLD", "0.4"))
     DOCLING_VISION_MODEL = os.getenv("DOCLING_VISION_MODEL", "qwen3-vl:latest")
-    DOCLING_LLM_MODEL = os.getenv("DOCLING_LLM_MODEL", "qwen2.5:14b")
+    DOCLING_LLM_MODEL = os.getenv("DOCLING_LLM_MODEL", "gpt-oss:20b")
+    DOCLING_CUDA_DEVICE = os.getenv("DOCLING_CUDA_DEVICE", "1")  # CUDA device for Docling (VLM/LLM)
 
     # Chunking
     CHUNK_MAX_TOKENS = int(os.getenv("CHUNK_MAX_TOKENS", "400"))

@@ -40,8 +40,11 @@ from PIL import Image
 import nltk
 from nltk.tokenize import sent_tokenize
 
+# Config import (CUDA 설정 전에 먼저 import)
+from app.services.rag.config import RAGConfig
+
 # CUDA 디바이스 설정 (VLM/LLM용)
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = RAGConfig.DOCLING_CUDA_DEVICE
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -52,9 +55,6 @@ from docling.datamodel.pipeline_options import (
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc import DoclingDocument, PictureItem, TableItem
-
-# Config import
-from app.services.rag.config import RAGConfig
 
 # NLTK 데이터 다운로드 (최초 1회만 필요)
 try:
@@ -149,11 +149,11 @@ class DoclingChunker:
 
     Example:
         >>> # 기본 모드
-        >>> chunker = DoclingCompleteChunker()
+        >>> chunker = DoclingChunker()
         >>> chunks, metadata = chunker.process_pdf_to_chunks(pdf_bytes, "test.pdf", output_dir)
         >>>
         >>> # 고급 모드 (VLM/LLM description 생성)
-        >>> chunker = DoclingCompleteChunker(advanced_mode=True)
+        >>> chunker = DoclingChunker(advanced_mode=True)
         >>> chunks, metadata = chunker.process_pdf_to_chunks(pdf_bytes, "test.pdf", output_dir)
     """
 
@@ -248,7 +248,7 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         # LLM/VLM 설정 (config 기본값 사용)
         self.llm_model = llm_model if llm_model is not None else RAGConfig.DOCLING_LLM_MODEL
         self.vision_model = vision_model if vision_model is not None else RAGConfig.DOCLING_VISION_MODEL
-        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.OLLAMA_URL
+        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.VLLM_URL
 
         # 프롬프트
         self.image_description_prompt = image_description_prompt
@@ -264,6 +264,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.progress_callback = progress_callback
 
         self.logger = logging.getLogger(__name__)
+
+        # OCR 결과 저장용
+        self.last_ocr_result = None
 
         # 상호 배타적 옵션 검증
         if self.force_ocr and self.force_no_ocr:
@@ -359,7 +362,7 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                 self.logger.error(f"vLLM API error: {response.status_code}")
                 return None
 
-        except Exception as e:
+        except Exception as e:  
             self.logger.error(f"vLLM API 호출 실패: {e}")
             return None
 
@@ -546,6 +549,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             self.logger.info(f"  - 깨진 문자 감지: {ocr_result.has_corrupted_text}")
             self.logger.info(f"  - 권장 언어: {ocr_result.recommended_lang}")
             self.logger.info(f"  - 결정: {ocr_result.reason}")
+
+        # OCR 결과 저장 (metadata에 포함시키기 위해)
+        self.last_ocr_result = ocr_result
 
         # 변환 실행
         converter = self._create_converter(ocr_result)
@@ -1413,11 +1419,35 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             chunk['section_id'] = section_id
 
         # 메타데이터
+        # OCR 정보 추출
+        if self.last_ocr_result:
+            ocr_used = self.last_ocr_result.needs_ocr
+            ocr_reason = self.last_ocr_result.reason
+            total_pages = self.last_ocr_result.total_pages
+            text_layer_ratio = self.last_ocr_result.text_layer_ratio
+        else:
+            # OCR 감지를 하지 않은 경우 (force_ocr, force_no_ocr 사용 시)
+            if self.force_ocr:
+                ocr_used = True
+                ocr_reason = "OCR 강제 활성화"
+            elif self.force_no_ocr:
+                ocr_used = False
+                ocr_reason = "OCR 강제 비활성화"
+            else:
+                ocr_used = False
+                ocr_reason = "OCR 감지 미수행"
+            total_pages = len(doc_dict.get("pages", []))
+            text_layer_ratio = 0.0
+
         metadata = {
             "table_count": len(doc_dict.get("tables", [])),
             "picture_count": len([p for p in doc_dict.get("pictures", []) if not p.get("deleted")]),
             "chunk_count": len(chunks),
             "source_file": source_filename,
+            "ocr_used": ocr_used,
+            "ocr_reason": ocr_reason,
+            "total_pages": total_pages,
+            "text_layer_ratio": text_layer_ratio,
         }
 
         return chunks, metadata

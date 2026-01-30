@@ -3,16 +3,14 @@
 Embeddings Module - Dense/Sparse 임베딩
 """
 import logging
-from typing import Optional, Tuple, List
-
-from langchain_ollama import OllamaEmbeddings
+from typing import Optional, Tuple, List, Union
 
 from .config import RAGConfig
 
 logger = logging.getLogger(__name__)
 
 # 싱글톤 인스턴스
-_dense_embeddings: Optional[OllamaEmbeddings] = None
+_dense_embeddings = None
 _sparse_embeddings = None
 _HAS_SPARSE = False
 
@@ -24,17 +22,33 @@ except ImportError:
     logger.warning("FastEmbedSparse not available, sparse search disabled")
 
 
-def get_dense_embeddings() -> OllamaEmbeddings:
-    """Dense 임베딩 모델 싱글톤"""
+def get_dense_embeddings():
+    """Dense 임베딩 모델 싱글톤 (타입에 따라 Ollama 또는 HuggingFace)"""
     global _dense_embeddings
-    
+
     if _dense_embeddings is None:
-        _dense_embeddings = OllamaEmbeddings(
-            model=RAGConfig.EMBED_MODEL,
-            base_url=RAGConfig.OLLAMA_URL,
-        )
-        logger.info(f"Dense embeddings initialized: {RAGConfig.EMBED_MODEL}")
-    
+        embed_type = RAGConfig.EMBED_TYPE.lower()
+
+        if embed_type == "ollama":
+            from langchain_ollama import OllamaEmbeddings
+            _dense_embeddings = OllamaEmbeddings(
+                model=RAGConfig.EMBED_MODEL,
+                base_url=RAGConfig.OLLAMA_URL,
+            )
+            logger.info(f"Dense embeddings initialized (Ollama): {RAGConfig.EMBED_MODEL}")
+
+        elif embed_type == "huggingface":
+            from langchain_huggingface import HuggingFaceEmbeddings
+            _dense_embeddings = HuggingFaceEmbeddings(
+                model_name=RAGConfig.EMBED_MODEL,
+                model_kwargs={'device': 'cuda'},  # GPU 사용
+                encode_kwargs={'normalize_embeddings': True}  # 정규화
+            )
+            logger.info(f"Dense embeddings initialized (HuggingFace): {RAGConfig.EMBED_MODEL}")
+
+        else:
+            raise ValueError(f"Unknown EMBED_TYPE: {embed_type}. Use 'ollama' or 'huggingface'")
+
     return _dense_embeddings
 
 

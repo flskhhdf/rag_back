@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-LLM Client Module - Ollama LLM 스트리밍
+LLM Client Module - vLLM OpenAI-compatible API
 """
 import logging
 import re
@@ -92,41 +92,50 @@ async def stream_llm_response(
     prompt: str,
     system_prompt: str = None,
     model: str = None,
-    ollama_url: str = None,
+    vllm_url: str = None,
     max_tokens: int = None
 ) -> AsyncGenerator[str, None]:
-    """Ollama LLM 비스트리밍 응답 (전체 응답 후 후처리)"""
+    """vLLM Chat Completions API 비스트리밍 응답 (전체 응답 후 후처리)"""
     model = model or RAGConfig.LLM_MODEL
-    ollama_url = ollama_url or RAGConfig.OLLAMA_URL
+    vllm_url = vllm_url or RAGConfig.VLLM_URL
     max_tokens = max_tokens or RAGConfig.MAX_TOKENS
 
     try:
         async with httpx.AsyncClient(timeout=240.0) as client:
+            # messages 배열 구성
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            # vLLM OpenAI-compatible Chat API payload
             payload = {
                 "model": model,
-                "prompt": prompt,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "top_p": 1.0,
                 "stream": False,  # 스트리밍 비활성화
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 1.0,
-                    "num_predict": max_tokens,
-                    "num_ctx": 50000,
-                }
             }
 
-            if system_prompt:
-                payload["system"] = system_prompt
-
-            # 전체 응답을 한 번에 받기
+            # 전체 응답을 한 번에 받기 (Chat Completions endpoint)
             response = await client.post(
-                f"{ollama_url}/api/generate",
+                f"{vllm_url}/v1/chat/completions",
                 json=payload
             )
             response.raise_for_status()
 
             import json
             result = response.json()
-            raw_response = result.get("response", "")
+
+            # OpenAI Chat API 형식: choices[0].message.content
+            choices = result.get("choices", [])
+            if not choices:
+                logger.warning("Empty response from LLM")
+                yield "응답을 생성할 수 없습니다."
+                return
+
+            raw_response = choices[0].get("message", {}).get("content", "")
 
             if not raw_response:
                 logger.warning("Empty response from LLM")

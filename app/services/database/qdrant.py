@@ -21,7 +21,8 @@ except Exception:
 
 
 # ===== Config =====
-DENSE_MODEL = os.getenv("EMBEDDING_MODEL", os.getenv("DENSE_MODEL", "qwen3-embedding:4b"))
+EMBED_TYPE = os.getenv("EMBED_TYPE", "huggingface")
+DENSE_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
 
@@ -35,7 +36,7 @@ DISABLE_SPARSE = os.getenv("DISABLE_SPARSE", "0").lower() in ("1", "true", "yes"
 
 # ===== 전역 객체 (싱글톤) =====
 _client: Optional[QdrantClient] = None
-_dense_embeddings: Optional[OllamaEmbeddings] = None
+_dense_embeddings = None  # OllamaEmbeddings or HuggingFaceEmbeddings
 _sparse_embeddings: Optional["FastEmbedSparse"] = None
 _vectorstore_cache: Dict[str, QdrantVectorStore] = {}
 
@@ -54,15 +55,31 @@ def get_client() -> QdrantClient:
     return _client
 
 
-def get_embeddings() -> Tuple[OllamaEmbeddings, Optional["FastEmbedSparse"]]:
-    """임베딩 모델 싱글톤"""
+def get_embeddings() -> Tuple[any, Optional["FastEmbedSparse"]]:
+    """임베딩 모델 싱글톤 (타입에 따라 Ollama 또는 HuggingFace)"""
     global _dense_embeddings, _sparse_embeddings
 
     if _dense_embeddings is None:
-        _dense_embeddings = OllamaEmbeddings(
-            model=DENSE_MODEL,
-            base_url=OLLAMA_URL,
-        )
+        embed_type = EMBED_TYPE.lower()
+
+        if embed_type == "ollama":
+            _dense_embeddings = OllamaEmbeddings(
+                model=DENSE_MODEL,
+                base_url=OLLAMA_URL,
+            )
+            print(f"[INFO] Dense embeddings initialized (Ollama): {DENSE_MODEL}")
+
+        elif embed_type == "huggingface":
+            from langchain_huggingface import HuggingFaceEmbeddings
+            _dense_embeddings = HuggingFaceEmbeddings(
+                model_name=DENSE_MODEL,
+                model_kwargs={'device': 'cuda'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            print(f"[INFO] Dense embeddings initialized (HuggingFace): {DENSE_MODEL}")
+
+        else:
+            raise ValueError(f"Unknown EMBED_TYPE: {embed_type}. Use 'ollama' or 'huggingface'")
 
     if not DISABLE_SPARSE and _HAS_SPARSE and _sparse_embeddings is None:
         try:
