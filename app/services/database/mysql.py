@@ -204,7 +204,7 @@ def create_notebook(notebook_id: str, title: str, created_by: str) -> bool:
                 print(f"[INFO] User {created_by} not found. Creating user automatically.")
                 # 이메일은 필수 필드가 아니거나 더미 값으로 처리 (스키마에 따라 다름)
                 # 여기서는 user_id를 기반으로 더미 이메일 생성
-                dummy_email = f"{created_by}@example.com"
+                dummy_email = f"{created_by}@tenergy-x.com"
                 cursor.execute(
                     "INSERT INTO users (id, username, email) VALUES (%s, %s, %s)",
                     (created_by, "Auto Created User", dummy_email)

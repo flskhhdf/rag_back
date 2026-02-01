@@ -40,8 +40,11 @@ from PIL import Image
 import nltk
 from nltk.tokenize import sent_tokenize
 
+# Config import (CUDA 설정 전에 먼저 import)
+from app.services.rag.config import RAGConfig
+
 # CUDA 디바이스 설정 (VLM/LLM용)
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = RAGConfig.DOCLING_CUDA_DEVICE
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -52,9 +55,6 @@ from docling.datamodel.pipeline_options import (
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc import DoclingDocument, PictureItem, TableItem
-
-# Config import
-from app.services.rag.config import RAGConfig
 
 # NLTK 데이터 다운로드 (최초 1회만 필요)
 try:
@@ -140,6 +140,7 @@ def _docling_table_to_markdown(table_data: Dict[str, Any]) -> str:
 
 
 class DoclingChunker:
+
     """
     Docling Complete + Dual Content 청킹 통합 클래스
 
@@ -174,10 +175,7 @@ class DoclingChunker:
         filter_junk_images: bool = True,
 
         # LLM/VLM 설정 (config 기본값 사용)
-        llm_provider: str = "ollama",  # openai, anthropic, ollama
         llm_model: str = None,
-        llm_api_key: Optional[str] = None,
-        llm_base_url: Optional[str] = None,
         vision_model: str = None,
         ollama_url: str = None,
 
@@ -218,12 +216,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             filter_junk_images: JUNK으로 분류된 이미지 필터링 (기본: True)
 
             # LLM/VLM 설정
-            llm_provider: LLM 제공자 (openai, anthropic, ollama)
             llm_model: LLM 모델명
-            llm_api_key: LLM API 키 (None이면 환경변수에서 읽음)
-            llm_base_url: LLM API base URL (커스텀 엔드포인트용)
-            vision_model: Ollama vision 모델명
-            ollama_url: Ollama 서버 URL
+            vision_model: VLM vision 모델명
+            ollama_url: vLLM 서버 URL
 
             # 프롬프트
             image_description_prompt: 이미지 description 프롬프트
@@ -251,12 +246,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.filter_junk_images = True if advanced_mode else filter_junk_images
 
         # LLM/VLM 설정 (config 기본값 사용)
-        self.llm_provider = llm_provider.lower()
         self.llm_model = llm_model if llm_model is not None else RAGConfig.DOCLING_LLM_MODEL
-        self.llm_api_key = llm_api_key
-        self.llm_base_url = llm_base_url
         self.vision_model = vision_model if vision_model is not None else RAGConfig.DOCLING_VISION_MODEL
-        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.OLLAMA_URL
+        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.VLLM_URL
 
         # 프롬프트
         self.image_description_prompt = image_description_prompt
@@ -272,6 +264,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.progress_callback = progress_callback
 
         self.logger = logging.getLogger(__name__)
+
+        # OCR 결과 저장용
+        self.last_ocr_result = None
 
         # 상호 배타적 옵션 검증
         if self.force_ocr and self.force_no_ocr:
@@ -289,25 +284,39 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
     # ===== Docling Complete 메서드 =====
 
     def _generate_vlm_description(self, image: Image.Image) -> Optional[str]:
-        """Ollama VLM을 사용하여 이미지 description 생성"""
+        """vLLM VLM을 사용하여 이미지 description 생성"""
         try:
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
             img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
             response = requests.post(
-                f"{self.ollama_url}/api/generate",
+                f"{self.ollama_url}/v1/chat/completions",
                 json={
                     "model": self.vision_model,
-                    "prompt": self.image_description_prompt,
-                    "images": [img_base64],
-                    "stream": False,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": self.image_description_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{img_base64}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
                 },
                 timeout=60
             )
 
             if response.status_code == 200:
-                desc = response.json().get("response", "").strip()
+                desc = response.json()["choices"][0]["message"]["content"].strip()
                 self.logger.debug(f"VLM description 생성 성공 ({len(desc)} chars)")
                 return desc
             else:
@@ -324,113 +333,37 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
 
         try:
             prompt = f"{self.table_description_prompt}\n\n{markdown_table}"
-
-            if self.llm_provider == "openai":
-                return self._call_openai(prompt)
-            elif self.llm_provider == "anthropic":
-                return self._call_anthropic(prompt)
-            elif self.llm_provider == "ollama":
-                return self._call_ollama_text(prompt)
-            else:
-                self.logger.warning(f"지원하지 않는 LLM provider: {self.llm_provider}")
-                return None
+            return self._call_vllm_text(prompt)
 
         except Exception as e:
             self.logger.warning(f"LLM table description 실패: {e}")
             return None
 
-    def _call_openai(self, prompt: str) -> Optional[str]:
-        """OpenAI API 호출"""
+    def _call_vllm_text(self, prompt: str) -> Optional[str]:
+        """vLLM 텍스트 모델 호출"""
         try:
-            import os
-            api_key = self.llm_api_key or os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                self.logger.error("OPENAI_API_KEY가 설정되지 않았습니다")
-                return None
-
-            base_url = self.llm_base_url or "https://api.openai.com/v1"
-
             response = requests.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                f"{self.ollama_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                },
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"].strip()
-            else:
-                self.logger.error(f"OpenAI API error: {response.status_code}")
-                return None
-
-        except Exception as e:
-            self.logger.error(f"OpenAI API 호출 실패: {e}")
-            return None
-
-    def _call_anthropic(self, prompt: str) -> Optional[str]:
-        """Anthropic API 호출"""
-        try:
-            import os
-            api_key = self.llm_api_key or os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                self.logger.error("ANTHROPIC_API_KEY가 설정되지 않았습니다")
-                return None
-
-            base_url = self.llm_base_url or "https://api.anthropic.com"
-
-            response = requests.post(
-                f"{base_url}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.llm_model,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
                     "max_tokens": 1024,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                return response.json()["content"][0]["text"].strip()
-            else:
-                self.logger.error(f"Anthropic API error: {response.status_code}")
-                return None
-
-        except Exception as e:
-            self.logger.error(f"Anthropic API 호출 실패: {e}")
-            return None
-
-    def _call_ollama_text(self, prompt: str) -> Optional[str]:
-        """Ollama 텍스트 모델 호출"""
-        try:
-            response = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": self.llm_model,
-                    "prompt": prompt,
-                    "stream": False,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
                 },
                 timeout=60
             )
 
             if response.status_code == 200:
-                return response.json().get("response", "").strip()
+                return response.json()["choices"][0]["message"]["content"].strip()
             else:
-                self.logger.error(f"Ollama API error: {response.status_code}")
+                self.logger.error(f"vLLM API error: {response.status_code}")
                 return None
 
-        except Exception as e:
-            self.logger.error(f"Ollama API 호출 실패: {e}")
+        except Exception as e:  
+            self.logger.error(f"vLLM API 호출 실패: {e}")
             return None
 
     def detect_ocr_requirement(self, pdf_path: Path) -> OCRDetectionResult:
@@ -617,6 +550,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             self.logger.info(f"  - 권장 언어: {ocr_result.recommended_lang}")
             self.logger.info(f"  - 결정: {ocr_result.reason}")
 
+        # OCR 결과 저장 (metadata에 포함시키기 위해)
+        self.last_ocr_result = ocr_result
+
         # 변환 실행
         converter = self._create_converter(ocr_result)
         result = converter.convert(pdf_path)
@@ -681,15 +617,6 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             image_desc_count = 0
             junk_skipped = 0
 
-            # Progress 구간 동적 계산 (30~70% 구간을 작업량에 비례해서 분배)
-            total_work = total_tables + (total_images - len(junk_image_indices))
-            if total_work > 0:
-                table_progress_range = 40 * (total_tables / total_work)  # 테이블이 차지하는 비율
-                image_progress_range = 40 - table_progress_range  # 이미지가 차지하는 비율
-            else:
-                table_progress_range = 20
-                image_progress_range = 20
-
         for item, _level in doc.iterate_items():
             # 테이블 처리
             if isinstance(item, TableItem):
@@ -710,13 +637,13 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                             if markdown_table:
                                 self.logger.info(f"🔄 테이블 description 생성 중 [{tbl_idx + 1}/{total_tables}]...")
 
-                                # Progress callback 호출 (동적 계산)
-                                if self.progress_callback and total_tables > 0:
-                                    progress = 30 + int(table_progress_range * (tbl_idx + 1) / total_tables)
+                                # Progress callback 호출
+                                if self.progress_callback:
                                     self.progress_callback({
-                                        'status': f'Processing table descriptions [{tbl_idx + 1}/{total_tables}]',
-                                        'progress': progress,
-                                        'filename': pdf_path.name,
+                                        'status': f'Generating table description [{tbl_idx + 1}/{total_tables}]',
+                                        'progress': 40 + int((tbl_idx / total_tables) * 20),
+                                        'current_table': tbl_idx + 1,
+                                        'total_tables': total_tables,
                                     })
 
                                 # LLM 요약 생성
@@ -761,16 +688,14 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
 
                             self.logger.info(f"🔄 이미지 description 생성 중 [{img_idx + 1 - junk_skipped}/{total_images - len(junk_image_indices)}]...")
 
-                            # Progress callback 호출 (동적 계산)
+                            # Progress callback 호출
                             if self.progress_callback:
-                                effective_images = total_images - len(junk_image_indices)
-                                if effective_images > 0:
-                                    progress = 30 + table_progress_range + int(image_progress_range * (img_idx + 1 - junk_skipped) / effective_images)
-                                    self.progress_callback({
-                                        'status': f'Processing image descriptions [{img_idx + 1 - junk_skipped}/{effective_images}]',
-                                        'progress': progress,
-                                        'filename': pdf_path.name,
-                                    })
+                                self.progress_callback({
+                                    'status': f'Generating image description [{img_idx + 1 - junk_skipped}/{total_images - len(junk_image_indices)}]',
+                                    'progress': 40 + int((img_idx / total_images) * 20),
+                                    'current_image': img_idx + 1 - junk_skipped,
+                                    'total_images': total_images - len(junk_image_indices),
+                                })
 
                             desc = self._generate_vlm_description(img)
                             if desc:
@@ -1494,11 +1419,35 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             chunk['section_id'] = section_id
 
         # 메타데이터
+        # OCR 정보 추출
+        if self.last_ocr_result:
+            ocr_used = self.last_ocr_result.needs_ocr
+            ocr_reason = self.last_ocr_result.reason
+            total_pages = self.last_ocr_result.total_pages
+            text_layer_ratio = self.last_ocr_result.text_layer_ratio
+        else:
+            # OCR 감지를 하지 않은 경우 (force_ocr, force_no_ocr 사용 시)
+            if self.force_ocr:
+                ocr_used = True
+                ocr_reason = "OCR 강제 활성화"
+            elif self.force_no_ocr:
+                ocr_used = False
+                ocr_reason = "OCR 강제 비활성화"
+            else:
+                ocr_used = False
+                ocr_reason = "OCR 감지 미수행"
+            total_pages = len(doc_dict.get("pages", []))
+            text_layer_ratio = 0.0
+
         metadata = {
             "table_count": len(doc_dict.get("tables", [])),
             "picture_count": len([p for p in doc_dict.get("pictures", []) if not p.get("deleted")]),
             "chunk_count": len(chunks),
             "source_file": source_filename,
+            "ocr_used": ocr_used,
+            "ocr_reason": ocr_reason,
+            "total_pages": total_pages,
+            "text_layer_ratio": text_layer_ratio,
         }
 
         return chunks, metadata
@@ -1564,7 +1513,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 청킹 실행
-    chunker = DoclingChunker(
+    chunker = DoclingCompleteChunker(
         # Docling 옵션
         image_scale=args.image_scale,
         enable_table_structure=not args.no_table_structure,
@@ -1628,7 +1577,7 @@ def process_pdf_to_chunks(
     PDF를 한 번에 처리하여 청크 생성 (Docling Complete → Dual Content Chunks)
 
     이 함수는 parser.py의 process_pdf_to_chunks()와 동일한 인터페이스를 제공하지만,
-    내부적으로 DoclingChunker를 사용합니다.
+    내부적으로 DoclingCompleteChunker를 사용합니다.
 
     Args:
         file_content: PDF 바이너리
@@ -1667,7 +1616,7 @@ def process_pdf_to_chunks(
         progress_callback=progress_callback,
     )
 
-    # PDF를 임시 파일로 저장 (DoclingChunker가 Path를 받기 때문)
+    # PDF를 임시 파일로 저장 (DoclingCompleteChunker가 Path를 받기 때문)
     import tempfile
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_pdf:
         tmp_pdf.write(file_content)

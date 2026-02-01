@@ -3,16 +3,14 @@
 Embeddings Module - Dense/Sparse 임베딩
 """
 import logging
-from typing import Optional, Tuple, List
-
-from langchain_ollama import OllamaEmbeddings
+from typing import Optional, Tuple, List, Union
 
 from .config import RAGConfig
 
 logger = logging.getLogger(__name__)
 
 # 싱글톤 인스턴스
-_dense_embeddings: Optional[OllamaEmbeddings] = None
+_dense_embeddings = None
 _sparse_embeddings = None
 _HAS_SPARSE = False
 
@@ -24,17 +22,42 @@ except ImportError:
     logger.warning("FastEmbedSparse not available, sparse search disabled")
 
 
-def get_dense_embeddings() -> OllamaEmbeddings:
-    """Dense 임베딩 모델 싱글톤"""
+def get_dense_embeddings():
+    """Dense 임베딩 모델 싱글톤 (vLLM, Ollama, 또는 HuggingFace)"""
     global _dense_embeddings
-    
+
     if _dense_embeddings is None:
-        _dense_embeddings = OllamaEmbeddings(
-            model=RAGConfig.EMBED_MODEL,
-            base_url=RAGConfig.OLLAMA_URL,
-        )
-        logger.info(f"Dense embeddings initialized: {RAGConfig.EMBED_MODEL}")
-    
+        embed_type = RAGConfig.EMBED_TYPE.lower()
+
+        if embed_type == "vllm":
+            # vLLM OpenAI-compatible API 사용
+            from openai import AsyncOpenAI
+            _dense_embeddings = AsyncOpenAI(
+                api_key="EMPTY",  # vLLM은 API key 불필요
+                base_url=RAGConfig.VLLM_EMBED_URL + "/v1",
+            )
+            logger.info(f"Dense embeddings initialized (vLLM): {RAGConfig.EMBED_MODEL} at {RAGConfig.VLLM_EMBED_URL}")
+
+        elif embed_type == "ollama":
+            from langchain_ollama import OllamaEmbeddings
+            _dense_embeddings = OllamaEmbeddings(
+                model=RAGConfig.EMBED_MODEL,
+                base_url=RAGConfig.OLLAMA_URL,
+            )
+            logger.info(f"Dense embeddings initialized (Ollama): {RAGConfig.EMBED_MODEL}")
+
+        elif embed_type == "huggingface":
+            from langchain_huggingface import HuggingFaceEmbeddings
+            _dense_embeddings = HuggingFaceEmbeddings(
+                model_name=RAGConfig.EMBED_MODEL,
+                model_kwargs={'device': 'cuda'},  # GPU 사용
+                encode_kwargs={'normalize_embeddings': True}  # 정규화
+            )
+            logger.info(f"Dense embeddings initialized (HuggingFace): {RAGConfig.EMBED_MODEL}")
+
+        else:
+            raise ValueError(f"Unknown EMBED_TYPE: {embed_type}. Use 'vllm', 'ollama', or 'huggingface'")
+
     return _dense_embeddings
 
 
@@ -60,10 +83,30 @@ def has_sparse_support() -> bool:
 async def embed_query(text: str) -> List[float]:
     """쿼리 텍스트의 Dense 임베딩 생성"""
     embeddings = get_dense_embeddings()
-    return embeddings.embed_query(text)
+    
+    # vLLM OpenAI client는 별도 처리
+    if RAGConfig.EMBED_TYPE.lower() == "vllm":
+        response = await embeddings.embeddings.create(
+            model=RAGConfig.EMBED_MODEL,
+            input=text,
+        )
+        return response.data[0].embedding
+    else:
+        # LangChain embeddings (Ollama, HuggingFace)
+        return embeddings.embed_query(text)
 
 
 async def embed_documents(texts: List[str]) -> List[List[float]]:
     """여러 텍스트의 Dense 임베딩 생성"""
     embeddings = get_dense_embeddings()
-    return embeddings.embed_documents(texts)
+    
+    # vLLM OpenAI client는 별도 처리
+    if RAGConfig.EMBED_TYPE.lower() == "vllm":
+        response = await embeddings.embeddings.create(
+            model=RAGConfig.EMBED_MODEL,
+            input=texts,
+        )
+        return [item.embedding for item in response.data]
+    else:
+        # LangChain embeddings (Ollama, HuggingFace)
+        return embeddings.embed_documents(texts)

@@ -12,6 +12,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import SparseVector
 from sentence_transformers import CrossEncoder
 
+try:
+    from transformers import AutoModel
+    import torch
+    _HAS_JINA = True
+except ImportError:
+    _HAS_JINA = False
+    logger.warning("transformers and torch not available. Jina Reranker will not be available.")
+
 from .config import RAGConfig
 from .embeddings import embed_query, get_sparse_embeddings, has_sparse_support
 
@@ -19,6 +27,56 @@ logger = logging.getLogger(__name__)
 
 # Reranker 싱글톤
 _reranker = None
+
+
+class JinaReranker:
+    """
+    Jina Reranker v3 공식 API
+    
+    Hugging Face: https://huggingface.co/jinaai/jina-reranker-v3
+    """
+    
+    def __init__(self, model_name: str = "jinaai/jina-reranker-v3", device: str = "cuda"):
+        if not _HAS_JINA:
+            raise ImportError("transformers와 torch가 필요합니다: pip install transformers torch")
+        
+        self.device = device if torch.cuda.is_available() else "cpu"
+        self.model_name = model_name
+        
+        logger.info(f"[Jina Reranker] 모델 로딩: {model_name} (device: {self.device})")
+        
+        # Jina 공식 API: AutoModel 사용
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype="auto",
+            trust_remote_code=True,
+        )
+        self.model.to(self.device)
+        self.model.eval()
+        
+        logger.info(f"[Jina Reranker] 로딩 완료")
+    
+    def predict(self, pairs: List[tuple]) -> List[float]:
+        """
+        CrossEncoder 호환 인터페이스
+        
+        Args:
+            pairs: [(query, document), ...] 형식의 리스트
+            
+        Returns:
+            각 pair에 대한 relevance score (0~1 범위)
+        """
+        if not pairs:
+            return []
+        
+        query = pairs[0][0]  # 모든 pair는 같은 query를 가짐
+        documents = [doc for _, doc in pairs]
+        
+        # Jina 공식 API 호출
+        results = self.model.rerank(query, documents)
+        
+        # relevance_score 추출 (float32 -> float 변환)
+        return [float(result['relevance_score']) for result in results]
 
 
 # Qdrant 클라이언트 싱글톤
@@ -39,13 +97,26 @@ def get_qdrant_client() -> QdrantClient:
     return _qdrant_client
 
 
-def get_reranker() -> CrossEncoder:
-    """Reranker 모델 싱글톤"""
+def get_reranker():
+    """Reranker 모델 싱글톤 (CrossEncoder 또는 Jina Reranker)"""
     global _reranker
     
     if _reranker is None:
-        _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
-        logger.info(f"Reranker loaded: {RAGConfig.RERANKER_ID}")
+        logger.info("[RERANKER] 싱글톤이 None, 새로 로딩합니다")
+        reranker_type = RAGConfig.RERANKER_TYPE.lower()
+        
+        if reranker_type == "jina":
+            if not _HAS_JINA:
+                logger.warning("Jina Reranker를 사용할 수 없습니다. CrossEncoder로 폴백합니다.")
+                _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
+                logger.info(f"Reranker loaded (fallback): {RAGConfig.RERANKER_ID}")
+            else:
+                _reranker = JinaReranker(model_name=RAGConfig.JINA_RERANKER_MODEL)
+        else:
+            _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
+            logger.info(f"Reranker loaded: {RAGConfig.RERANKER_ID}")
+    else:
+        logger.info("[RERANKER] 싱글톤 재사용 (이미 로딩됨)")
     
     return _reranker
 

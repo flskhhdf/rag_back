@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-LLM Client Module - Ollama LLM 스트리밍
+LLM Client Module - vLLM OpenAI-compatible API
 """
 import logging
 import re
-from typing import List, Dict, AsyncGenerator, Tuple
+from typing import List, Dict, AsyncGenerator, Tuple, Any   
 import httpx
 
 from .config import RAGConfig, SYS_PROMPT, SYS_PROMPT_NO_CTX, CTX_TEMPLATE
@@ -39,19 +39,63 @@ def clean_stream_chunk(text: str) -> str:
 
 def build_rag_prompt(
     query: str,
-    contexts: List[str],
-    history: List[Dict[str, str]] = None
+    contexts: List[str] = None,
+    history: List[Dict[str, str]] = None,
+    results: List[Dict[str, Any]] = None
 ) -> Tuple[str, str]:
     """RAG 프롬프트 생성 - config_file.py 스타일
+    
+    Args:
+        query: 사용자 질문
+        contexts: 텍스트 컨텍스트 리스트 (하위 호환성, deprecated)
+        history: 대화 이력
+        results: 검색 결과 (payload 포함)
     
     Returns:
         (system_prompt, user_prompt) 튜플
     """
-    # 컨텍스트 포맷팅
-    context_text = "\n\n".join([
-        f"[문서 {i+1}]\n{ctx}"
-        for i, ctx in enumerate(contexts)
-    ])
+    # results가 제공되면 이를 사용하여 메타데이터 포함 컨텍스트 생성
+    if results:
+        logger.info(f"[DEBUG] Building context from {len(results)} results")
+        context_parts = []
+        for i, result in enumerate(results, 1):
+            text = result.get("expanded_text") or result.get("text", "")
+            payload = result.get("payload", {})
+            
+            # 디버깅: payload 확인
+            logger.info(f"[Context {i}] Payload keys: {list(payload.keys())}")
+            
+            # 메타데이터 추출 (payload.metadata 안에 있음)
+            metadata = payload.get("metadata", {})
+            filename = metadata.get("filename", "알 수 없음")
+            
+            # page_no 또는 pages (set) 처리
+            page_no = metadata.get("page_no")
+            if page_no is None:
+                pages_set = metadata.get("pages")
+                if pages_set and isinstance(pages_set, set):
+                    page_no = ", ".join(map(str, sorted(pages_set)))
+                elif pages_set and isinstance(pages_set, list):
+                    page_no = ", ".join(map(str, sorted(pages_set)))
+                else:
+                    page_no = "N/A"
+            
+            logger.info(f"[Context {i}] filename={filename}, page_no={page_no}")
+            
+            # 헤더 추가
+            header = f"[파일명: {filename} | 페이지: {page_no}]"
+            context_parts.append(f"[문서 {i}]\n{header}\n{text}")
+        
+        context_text = "\n\n".join(context_parts)
+        logger.info(f"[DEBUG] Context preview (first 200 chars): {context_text[:200]}")
+    elif contexts:
+        # 하위 호환성: contexts만 제공된 경우 (메타데이터 없음)
+        context_text = "\n\n".join([
+            f"[문서 {i+1}]\n{ctx}"
+            for i, ctx in enumerate(contexts)
+        ])
+    else:
+        context_text = ""
     
     # 대화 이력 포맷팅
     history_text = ""
@@ -65,7 +109,7 @@ def build_rag_prompt(
         history_text = "\n".join(history_parts)
     
     # 컨텍스트 유무에 따른 시스템 프롬프트 선택
-    if contexts:
+    if context_text:
         system_prompt = SYS_PROMPT
         user_prompt = CTX_TEMPLATE.format(
             Lang=RAGConfig.SUMMARIZE_LANG,
@@ -92,59 +136,71 @@ async def stream_llm_response(
     prompt: str,
     system_prompt: str = None,
     model: str = None,
-    ollama_url: str = None,
+    vllm_url: str = None,
     max_tokens: int = None
 ) -> AsyncGenerator[str, None]:
-    """Ollama LLM 비스트리밍 응답 (전체 응답 후 후처리)"""
+    """vLLM Chat Completions API 응답 (gpt-oss-120b용 non-streaming)"""
+    import json
+    import time
+
     model = model or RAGConfig.LLM_MODEL
-    ollama_url = ollama_url or RAGConfig.OLLAMA_URL
+    vllm_url = vllm_url or RAGConfig.VLLM_URL
     max_tokens = max_tokens or RAGConfig.MAX_TOKENS
 
     try:
+        start_time = time.time()
+
         async with httpx.AsyncClient(timeout=240.0) as client:
+            # messages 배열 구성
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            # vLLM OpenAI-compatible Chat API payload
             payload = {
                 "model": model,
-                "prompt": prompt,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "top_p": 1.0,
                 "stream": False,  # 스트리밍 비활성화
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 1.0,
-                    "num_predict": max_tokens,
-                    "num_ctx": 50000,
-                }
             }
 
-            if system_prompt:
-                payload["system"] = system_prompt
-
-            # 전체 응답을 한 번에 받기
+            # 요청
             response = await client.post(
-                f"{ollama_url}/api/generate",
-                json=payload
+                f"{vllm_url}/v1/chat/completions",
+                json=payload,
+                timeout=240.0
             )
             response.raise_for_status()
 
-            import json
-            result = response.json()
-            raw_response = result.get("response", "")
+            # 응답 파싱
+            data = response.json()
+            choices = data.get("choices", [])
 
-            if not raw_response:
-                logger.warning("Empty response from LLM")
+            if not choices:
                 yield "응답을 생성할 수 없습니다."
                 return
 
-            # 원본 응답 로깅
-            logger.info(f"[RAW LLM RESPONSE]\n{raw_response}")
+            # content 추출
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
 
-            # 후처리: 정규화 및 정제
-            cleaned_response = clean_stream_chunk(raw_response)
+            if not content:
+                yield "응답이 비어있습니다."
+                return
 
-            # 정제된 응답 로깅
-            if cleaned_response != raw_response:
-                logger.info(f"[CLEANED LLM RESPONSE]\n{cleaned_response}")
+            # 텍스트 정제
+            cleaned = clean_stream_chunk(content)
 
-            # 정제된 응답 반환
-            yield cleaned_response
+            # 로깅
+            total_time = time.time() - start_time
+            logger.info(f"[FULL LLM RESPONSE]\n{cleaned}")
+            logger.info(f"⏱️  Total Generation Time: {total_time:.3f}s")
+
+            # 전체 응답을 한 번에 yield
+            yield cleaned
 
     except Exception as e:
         logger.error(f"LLM request failed: {e}")

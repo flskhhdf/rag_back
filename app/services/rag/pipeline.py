@@ -119,7 +119,7 @@ class RAGPipeline:
             else:
                 expanded_results = reranked_results[:self.config.TOP_K_FINAL]
 
-            # 5. 컨텍스트 추출
+            # 5. 컨텍스트 추출 (하위 호환성)
             contexts = []
             for result in expanded_results:
                 text = result.get("expanded_text") or result.get("text", "")
@@ -137,10 +137,10 @@ class RAGPipeline:
                 yield "검색된 문서가 없습니다. 다른 질문을 시도해보세요."
                 return
 
-            # 6. 프롬프트 생성 및 LLM 스트리밍
+            # 6. 프롬프트 생성 및 LLM 스트리밍 (메타데이터 포함)
             system_prompt, user_prompt = build_rag_prompt(
                 query=query,
-                contexts=contexts,
+                results=expanded_results,  # payload 포함된 전체 결과 전달
                 history=chat_history
             )
 

@@ -286,21 +286,135 @@ sudo systemctl status redis-server
 sudo systemctl restart redis-server
 ```
 
-### 2. Celery Worker가 작업을 받지 못함
+### 2. Celery Worker가 작업을 받지 못함 (PENDING 상태로 멈춤)
 
-- Redis URL 확인: `.env` 파일의 `REDIS_URL` 확인
-- Worker 큐 이름 확인: `pdf_processing` 큐로 작업이 전송되는지 확인
-- Flower에서 Worker 상태 확인
+**증상**: 작업 상태 조회 시 계속 `PENDING` 상태로 남아있고 처리되지 않음
 
-### 3. 메모리 부족
+```json
+{
+  "task_id": "...",
+  "state": "PENDING",
+  "status": "Task is waiting in queue"
+}
+```
+
+**진단 방법**:
+
+```bash
+# 1. Worker가 리스닝하는 큐 확인
+celery -A app.celery_app inspect active_queues
+
+# 출력 예시 (문제 상황)
+->  celery@enpl: OK
+    * {'name': 'celery', ...}  # ❌ 'celery' 큐만 리스닝 중
+
+# 2. Redis 큐 상태 확인
+redis-cli LLEN pdf_processing  # pdf_processing 큐 길이
+redis-cli LLEN celery           # celery 큐 길이
+```
+
+**원인**: Worker가 `celery` 큐만 리스닝하고 있지만, 작업은 `pdf_processing` 큐로 전송됨
+
+**해결 방법**:
+
+```bash
+# 1. 기존 Worker 종료
+pkill -f "celery worker"
+
+# 2. 올바른 큐로 Worker 재시작
+celery -A app.celery_app worker \
+  --loglevel=info \
+  --concurrency=2 \
+  --queues=pdf_processing \
+  --pool=prefork
+
+# 또는 짧은 옵션
+celery -A app.celery_app worker --loglevel=info -Q pdf_processing
+```
+
+**확인 사항**:
+- Worker 로그의 `[queues]` 섹션에 **pdf_processing**이 표시되어야 함
+- Flower(`http://localhost:5555`)에서 Worker가 `pdf_processing` 큐를 리스닝하는지 확인
+- 이전에 PENDING이었던 작업이 자동으로 처리되기 시작함
+
+**Flower 설정**:
+
+Flower가 Worker를 표시하지 않는 경우:
+
+```bash
+# Flower를 broker URL과 함께 실행
+celery -A app.celery_app flower \
+  --broker=redis://localhost:6379/0 \
+  --port=5555
+```
+
+### 3. AttributeError: 'RAGConfig' has no attribute 'OLLAMA_URL'
+
+**증상**: Celery worker 로그에서 다음 에러 발생
+
+```
+AttributeError: type object 'RAGConfig' has no attribute 'OLLAMA_URL'
+  File "app/services/document/parser.py", line 251, in __init__
+    self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.OLLAMA_URL
+```
+
+**원인**: Ollama에서 vLLM으로 마이그레이션하면서 `OLLAMA_URL`을 `VLLM_URL`로 변경했지만, 임베딩 모델은 여전히 Ollama를 사용함
+
+**해결 방법**:
+
+`app/services/rag/config.py`에 임베딩용 `OLLAMA_URL` 추가:
+
+```python
+class RAGConfig:
+    # Embedding (Ollama 사용)
+    EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:4b")
+    SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
+    OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # For embeddings
+
+    # LLM (vLLM 사용)
+    VLLM_URL = os.getenv("VLLM_HOST", "http://localhost:8001")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:120b")
+```
+
+**최종 구성**:
+- **임베딩**: Ollama (http://localhost:11434) - qwen3-embedding:4b
+- **LLM (RAG 응답)**: vLLM (http://localhost:8001) - gpt-oss:120b
+- **Docling (VLM/LLM)**: vLLM (http://localhost:8001) - qwen3-vl, qwen2.5:14b
+
+### 4. 메모리 부족
 
 - Worker concurrency 줄이기: `--concurrency=1`
 - Worker prefetch 줄이기: `celery_app.py`에서 `worker_prefetch_multiplier=1`
 
-### 4. 작업 타임아웃
+### 5. 작업 타임아웃
 
 - Soft timeout 조정: `celery_app.py`에서 `task_soft_time_limit` 증가
 - Hard timeout 조정: `task_time_limit` 증가
+
+### 6. Worker 재시작이 필요한 경우
+
+코드 변경 후 Worker를 재시작해야 변경사항이 반영됩니다:
+
+```bash
+# 1. Worker 프로세스 찾기
+ps aux | grep "celery worker"
+
+# 2. Worker 종료
+pkill -f "celery worker"
+
+# 3. Worker 재시작 (pdf_processing 큐)
+celery -A app.celery_app worker \
+  --loglevel=info \
+  --concurrency=2 \
+  --queues=pdf_processing \
+  --pool=prefork
+```
+
+**변경사항이 반영되어야 하는 경우**:
+- `app/tasks.py` 수정
+- `app/celery_app.py` 설정 변경
+- `app/services/` 하위 모듈 변경
+- `.env` 파일의 환경변수 변경
 
 ## 라이센스
 
