@@ -9,17 +9,21 @@ class RAGConfig:
     """RAG 파이프라인 설정"""
     
     # Embedding
-    EMBED_TYPE = os.getenv("EMBED_TYPE", "huggingface")  # "ollama" or "huggingface"
-    EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")  # "qwen3-embedding:4b" (ollama) or "BAAI/bge-m3" (huggingface)
+    EMBED_TYPE = os.getenv("EMBED_TYPE", "vllm")  # "vllm", "ollama", or "huggingface"
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
     SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
     OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # For ollama embeddings
+    VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8004")  # For vLLM embeddings
+    
     
     # Search
     K_PER_MODALITY = int(os.getenv("K_PER_MODALITY", "20"))
     TOP_K_FINAL = int(os.getenv("TOP_K_FINAL", "5"))
     
     # Reranking
-    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")
+    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "jina")  # "jina" or "crossencoder"
+    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
+    JINA_RERANKER_MODEL = os.getenv("JINA_RERANKER_MODEL", "jinaai/jina-reranker-v3")  # For Jina Reranker
     RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))
     
     # RRF Fusion
