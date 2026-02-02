@@ -12,7 +12,7 @@ from typing import List, Dict, Any, AsyncGenerator
 from .config import RAGConfig
 from .retriever import hybrid_search, rerank_results, get_qdrant_client
 from .context_expansion import expand_context_with_neighbors
-from .llm_client import build_rag_prompt, stream_llm_response
+from .llm_client import build_rag_messages, stream_llm_response
 
 # 로거 설정
 logger = logging.getLogger(__name__)
@@ -78,10 +78,10 @@ class RAGPipeline:
             logger.info(f"[NEW QUERY] PDF: {filename}, Query: {query}")
             logger.info("-"*80)
 
-            # 1. 대화 히스토리 포맷팅
+            # 1. 대화 히스토리 포맷팅 (최근 6턴 = 12개 메시지)
             prior_dialog = ""
             if chat_history:
-                recent = chat_history[-4:]
+                recent = chat_history[-12:]
                 prior_dialog = "\n".join([
                     f"{msg.get('role', 'user')}: {msg.get('content', '')[:200]}"
                     for msg in recent
@@ -137,15 +137,15 @@ class RAGPipeline:
                 yield "검색된 문서가 없습니다. 다른 질문을 시도해보세요."
                 return
 
-            # 6. 프롬프트 생성 및 LLM 스트리밍 (메타데이터 포함)
-            system_prompt, user_prompt = build_rag_prompt(
+            # 6. Messages 배열 생성 및 LLM 스트리밍 (멀티턴 대화 지원)
+            messages = build_rag_messages(
                 query=query,
                 results=expanded_results,  # payload 포함된 전체 결과 전달
                 history=chat_history
             )
 
             t_llm_start = time.time()
-            async for chunk in stream_llm_response(user_prompt, system_prompt=system_prompt):
+            async for chunk in stream_llm_response(messages):
                 yield chunk
             t_llm = time.time() - t_llm_start
             logger.info(f"⏱️  [3] LLM Response Generation: {t_llm:.3f}s")

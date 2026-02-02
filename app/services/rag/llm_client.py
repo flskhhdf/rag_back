@@ -37,22 +37,22 @@ def clean_stream_chunk(text: str) -> str:
     return text
 
 
-def build_rag_prompt(
+def build_rag_messages(
     query: str,
     contexts: List[str] = None,
     history: List[Dict[str, str]] = None,
     results: List[Dict[str, Any]] = None
-) -> Tuple[str, str]:
-    """RAG 프롬프트 생성 - config_file.py 스타일
+) -> List[Dict[str, str]]:
+    """RAG Messages 배열 생성 - OpenAI Chat API 표준 멀티턴 대화 지원
     
     Args:
         query: 사용자 질문
         contexts: 텍스트 컨텍스트 리스트 (하위 호환성, deprecated)
-        history: 대화 이력
+        history: 대화 이력 [{"role": "user/assistant", "content": "..."}]
         results: 검색 결과 (payload 포함)
     
     Returns:
-        (system_prompt, user_prompt) 튜플
+        messages: OpenAI Chat API 형식의 메시지 배열
     """
     # results가 제공되면 이를 사용하여 메타데이터 포함 컨텍스트 생성
     if results:
@@ -97,49 +97,59 @@ def build_rag_prompt(
     else:
         context_text = ""
     
-    # 대화 이력 포맷팅
-    history_text = ""
-    if history:
-        recent_history = history[-6:]
-        history_parts = []
-        for msg in recent_history:
-            role = "사용자" if msg.get("role") == "user" else "어시스턴트"
-            content = msg.get("content", "")
-            history_parts.append(f"{role}: {content}")
-        history_text = "\n".join(history_parts)
+    # Messages 배열 구성
+    messages = []
     
-    # 컨텍스트 유무에 따른 시스템 프롬프트 선택
+    # 1. System message
     if context_text:
-        system_prompt = SYS_PROMPT
-        user_prompt = CTX_TEMPLATE.format(
+        messages.append({"role": "system", "content": SYS_PROMPT})
+    else:
+        messages.append({"role": "system", "content": SYS_PROMPT_NO_CTX})
+    
+    # 2. 대화 이력 추가 (최근 6턴 = 12개 메시지)
+    if history:
+        recent_history = history[-12:]
+        for msg in recent_history:
+            messages.append({
+                "role": msg.get("role"),
+                "content": msg.get("content")
+            })
+    
+    # 3. 현재 사용자 질문 (컨텍스트 포함)
+    if context_text:
+        current_user_message = CTX_TEMPLATE.format(
             Lang=RAGConfig.SUMMARIZE_LANG,
             DOCUMENT_CONTEXT=context_text,
-            RECENT_DIALOG=history_text or "(없음)",
+            RECENT_DIALOG="",  # 대화 이력은 messages에 이미 포함되어 있음
             QUERY=query
         )
     else:
-        system_prompt = SYS_PROMPT_NO_CTX
-        user_prompt = f"""<RECENT_DIALOG>
-{history_text or "(없음)"}
-</RECENT_DIALOG>
-
-<USER_QUERY>
+        current_user_message = f"""<USER_QUERY>
 {query}
 </USER_QUERY>
 """
     
-    return system_prompt, user_prompt
+    messages.append({"role": "user", "content": current_user_message})
+    
+    logger.info(f"[DEBUG] Built {len(messages)} messages for LLM")
+    return messages
 
 
 
 async def stream_llm_response(
-    prompt: str,
-    system_prompt: str = None,
+    messages: List[Dict[str, str]],
     model: str = None,
     vllm_url: str = None,
     max_tokens: int = None
 ) -> AsyncGenerator[str, None]:
-    """vLLM Chat Completions API 응답 (gpt-oss-120b용 non-streaming)"""
+    """vLLM Chat Completions API 응답 (멀티턴 대화 지원)
+    
+    Args:
+        messages: OpenAI Chat API 형식의 메시지 배열
+        model: LLM 모델명 (기본값: RAGConfig.LLM_MODEL)
+        vllm_url: vLLM 서버 URL (기본값: RAGConfig.VLLM_URL)
+        max_tokens: 최대 토큰 수 (기본값: RAGConfig.MAX_TOKENS)
+    """
     import json
     import time
 
@@ -151,12 +161,6 @@ async def stream_llm_response(
         start_time = time.time()
 
         async with httpx.AsyncClient(timeout=240.0) as client:
-            # messages 배열 구성
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
-
             # vLLM OpenAI-compatible Chat API payload
             payload = {
                 "model": model,

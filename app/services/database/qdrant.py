@@ -7,6 +7,7 @@ from datetime import datetime
 
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, SparseVectorParams, SparseIndexParams
@@ -55,14 +56,51 @@ def get_client() -> QdrantClient:
     return _client
 
 
+# vLLM용 LangChain Embeddings wrapper
+class VLLMEmbeddings(Embeddings):
+    """vLLM OpenAI client를 LangChain Embeddings 인터페이스로 래핑"""
+    
+    def __init__(self, client, model_name: str):
+        super().__init__()
+        self.client = client
+        self.model_name = model_name
+    
+    def embed_query(self, text: str) -> List[float]:
+        """단일 텍스트 임베딩"""
+        response = self.client.embeddings.create(
+            model=self.model_name,
+            input=text,
+        )
+        return response.data[0].embedding
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """여러 텍스트 임베딩"""
+        response = self.client.embeddings.create(
+            model=self.model_name,
+            input=texts,
+        )
+        return [item.embedding for item in response.data]
+
+
 def get_embeddings() -> Tuple[any, Optional["FastEmbedSparse"]]:
-    """임베딩 모델 싱글톤 (타입에 따라 Ollama 또는 HuggingFace)"""
+    """임베딩 모델 싱글톤 (vLLM, Ollama, 또는 HuggingFace)"""
     global _dense_embeddings, _sparse_embeddings
 
     if _dense_embeddings is None:
         embed_type = EMBED_TYPE.lower()
 
-        if embed_type == "ollama":
+        if embed_type == "vllm":
+            # vLLM OpenAI client를 LangChain 인터페이스로 래핑
+            from openai import OpenAI
+            vllm_embed_url = os.getenv("VLLM_EMBED_URL", "http://localhost:8004")
+            client = OpenAI(
+                api_key="EMPTY",
+                base_url=vllm_embed_url + "/v1",
+            )
+            _dense_embeddings = VLLMEmbeddings(client, DENSE_MODEL)
+            print(f"[INFO] Dense embeddings initialized (vLLM): {DENSE_MODEL} at {vllm_embed_url}")
+
+        elif embed_type == "ollama":
             _dense_embeddings = OllamaEmbeddings(
                 model=DENSE_MODEL,
                 base_url=OLLAMA_URL,
@@ -79,7 +117,7 @@ def get_embeddings() -> Tuple[any, Optional["FastEmbedSparse"]]:
             print(f"[INFO] Dense embeddings initialized (HuggingFace): {DENSE_MODEL}")
 
         else:
-            raise ValueError(f"Unknown EMBED_TYPE: {embed_type}. Use 'ollama' or 'huggingface'")
+            raise ValueError(f"Unknown EMBED_TYPE: {embed_type}. Use 'vllm', 'ollama', or 'huggingface'")
 
     if not DISABLE_SPARSE and _HAS_SPARSE and _sparse_embeddings is None:
         try:
