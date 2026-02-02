@@ -98,6 +98,16 @@ class RAGPipeline:
                 yield "검색된 문서가 없습니다. 다른 질문을 시도해보세요."
                 return
 
+            # 디버깅: RRF 융합 직후 결과 미리보기
+            logger.info(f"[DEBUG] RRF Fusion results (top 10):")
+            for i, result in enumerate(search_results[:10], 1):
+                text_preview = result.get("text", "")[:150].replace("\n", " ")
+                rrf_score = result.get("rrf_score", 0)
+                payload = result.get("payload", {})
+                metadata = payload.get("metadata", {})
+                page_no = metadata.get("page_no", "N/A")
+                logger.info(f"  [{i}] RRF={rrf_score:.4f} | Page={page_no} | Text: {text_preview}...")
+
             # 3. 리랭킹
             t_rerank_start = time.time()
             reranked_results = rerank_results(
@@ -109,7 +119,39 @@ class RAGPipeline:
             logger.info(f"⏱️  [2] Reranking: {t_rerank:.3f}s")
             logger.info(f"After reranking: {len(reranked_results)} results")
 
-            # 4. 이웃 청크 확장
+            # 디버깅: 리랭킹 후 결과 미리보기
+            logger.info(f"[DEBUG] After reranking (top 10):")
+            for i, result in enumerate(reranked_results[:10], 1):
+                text_preview = result.get("text", "")[:150].replace("\n", " ")
+                rerank_score = result.get("rerank_score", 0)
+                payload = result.get("payload", {})
+                metadata = payload.get("metadata", {})
+                page_no = metadata.get("page_no", "N/A")
+                logger.info(f"  [{i}] Rerank={rerank_score:.4f} | Page={page_no} | Text: {text_preview}...")
+
+            # 4. 검색 결과 신뢰도 체크
+            max_score = max([r.get("rerank_score") or r.get("rrf_score") or r.get("score", 0) for r in reranked_results])
+            logger.info(f"[SCORE CHECK] Max rerank score: {max_score:.4f}, Threshold: {self.config.MIN_SEARCH_SCORE}")
+            
+            if max_score < self.config.MIN_SEARCH_SCORE:
+                logger.warning(f"⚠️  Search scores too low (max={max_score:.4f} < {self.config.MIN_SEARCH_SCORE})")
+                logger.warning("⚠️  Using conversation context only (no document context)")
+                
+                # 검색 결과 무시, 대화 히스토리만 사용
+                messages = build_rag_messages(
+                    query=query,
+                    results=None,  # 검색 결과 없음
+                    history=chat_history
+                )
+                
+                t_llm_start = time.time()
+                async for chunk in stream_llm_response(messages):
+                    yield chunk
+                t_llm = time.time() - t_llm_start
+                logger.info(f"⏱️  [LLM] Response (conversation-only): {t_llm:.3f}s")
+                return
+            
+            # 5. 이웃 청크 확장
             if self.config.NEIGHBOR_EXPAND > 0:
                 expanded_results = expand_context_with_neighbors(
                     collection_name=collection_name,
@@ -130,7 +172,7 @@ class RAGPipeline:
             logger.info(f"[RETRIEVED] {len(expanded_results)} chunks")
             for i, r in enumerate(expanded_results, 1):
                 score = r.get("rerank_score") or r.get("rrf_score") or r.get("score", 0)
-                logger.info(f"  Chunk {i}: score={score:.4f}")
+                logger.info(f"  Chunk {i}: rerank_score={score:.6f}")
             logger.info("="*80)
 
             if not contexts:

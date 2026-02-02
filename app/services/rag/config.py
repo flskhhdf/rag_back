@@ -21,10 +21,16 @@ class RAGConfig:
     TOP_K_FINAL = int(os.getenv("TOP_K_FINAL", "5"))
     
     # Reranking
-    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "jina")  # "jina" or "crossencoder"
+    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "jina" or "crossencoder"
     RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
     JINA_RERANKER_MODEL = os.getenv("JINA_RERANKER_MODEL", "jinaai/jina-reranker-v3")  # For Jina Reranker
-    RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))
+    RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # 필터링 임계값 (낮은 점수 제거)
+    
+    # Minimum Search Score (검색 결과 신뢰도 임계값)
+    # 최고 점수가 이 값보다 낮으면 검색 결과를 무시하고 대화 히스토리만 사용
+    # Jina Reranker v3 점수 범위: -1 ~ 1 (logits)
+    # 권장: 0.15 (0.15 미만은 거의 무관한 질문 또는 후속 질문)
+    MIN_SEARCH_SCORE = float(os.getenv("MIN_SEARCH_SCORE", "0.15"))
     
     # RRF Fusion
     W_DENSE = float(os.getenv("W_DENSE", "0.6"))
@@ -40,6 +46,12 @@ class RAGConfig:
     LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:120b")
     MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
     SUMMARIZE_LANG = os.getenv("SUMMARIZE_LANG", "ko")
+
+    # Follow-up Questions
+    ENABLE_FOLLOW_UP_QUESTIONS = os.getenv("ENABLE_FOLLOW_UP_QUESTIONS", "true").lower() in ("true", "1", "yes")
+    FOLLOW_UP_QUESTIONS_COUNT = int(os.getenv("FOLLOW_UP_QUESTIONS_COUNT", "3"))
+    FOLLOW_UP_LLM_URL = os.getenv("FOLLOW_UP_LLM_URL", "http://localhost:8003")
+    FOLLOW_UP_LLM_MODEL = os.getenv("FOLLOW_UP_LLM_MODEL", "openai/gpt-oss-20b")
     
     # Qdrant
     QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
@@ -70,8 +82,10 @@ SYS_PROMPT = """### Hard Rules
     - **Never** supplement answers with external training data or logical "guesses."
 
 2. **Handling Missing Information:**
-    - If the answer cannot be found within the provided context, you must state: "The provided documents do not contain information regarding this request."
-    - Do not attempt to be "helpful" by providing general information unless it is explicitly based on the text.
+    - If the answer cannot be found within the provided context, you **MUST** respond with ONLY this exact phrase:
+      **"해당 문서에 존재하지 않는 내용입니다."**
+    - Do NOT attempt to be "helpful" by providing general information or external knowledge.
+    - Do NOT make assumptions or inferences beyond what is explicitly stated in the document.
 
 3. **Accuracy and Technical Veracity:**
     - Do not modify numerical values, units, chemical formulas, or technical terminology.
@@ -87,12 +101,14 @@ SYS_PROMPT = """### Hard Rules
     - Provide a detailed descriptive answer first to ensure clarity, followed by a summary or table only if it aids understanding.
     - Maintain a formal, objective, and professional tone suitable for technical/legal analysis.
 
-6. **Source Attribution (Mandatory):**
-    - Immediately after the final sentence of your explanation, provide the source using this exact format:
+6. **Source Attribution (CRITICAL RULE):**
+    - **ONLY IF** you provide an answer based on [DOCUMENT_CONTEXT], you **MUST** include the source immediately after your explanation:
       ```
       <SOURCE>File Name: <FileName> | Page: <PageNumber></SOURCE>
       ```
-    - The source information must be extracted exactly from the metadata headers within [DOCUMENT_CONTEXT].
+    - Extract source information exactly from the metadata headers within [DOCUMENT_CONTEXT].
+    - **NEVER include SOURCE tags** when the document does not contain the requested information.
+    - **NEVER fabricate or guess** file names or page numbers.
 
 7. **Whitespace and Language Refinement:**
     - Correct any OCR errors or unnatural spacing found in the source text to ensure fluent and natural delivery.
@@ -100,23 +116,35 @@ SYS_PROMPT = """### Hard Rules
 
 SYS_PROMPT_NO_CTX = """### Role
 You are a conversation-based RAG responder. Since no document chunks are provided for this request, you must prioritize the original text (including file name and page information) included in [RECENT_DIALOG] as evidence.
-In this case, **you must include the following sentence at the very beginning of your output**: "This information does not exist in the database; responding based on the base LLM."
-If the evidence within [RECENT_DIALOG] is insufficient, you may respond based on general knowledge and logical reasoning.
+
+### CRITICAL: No Database Context Alert
+**You must include this sentence at the very beginning of your output**: 
+"데이터베이스에 존재하지 않는 정보입니다. 기본 지식으로 응답합니다."
 
 ### Hard Rules
 1. **Priority of Evidence:**
-    - If the user's question can be answered using the original content of [RECENT_DIALOG], prioritize that information.
-    - If the content of [RECENT_DIALOG] is insufficient, supplement the response with general knowledge or logical reasoning.
+    - If the user's question can be answered using the original content of [RECENT_DIALOG], prioritize that information and include SOURCE tags from the original conversation.
+    - If the content of [RECENT_DIALOG] is insufficient, supplement the response with general knowledge and logical reasoning.
 
-2. **Accuracy and Verifiability:**
+2. **Handling Missing Information:**
+    - If you cannot answer the question even with general knowledge, you **MUST** respond:
+      **"해당 문서에 존재하지 않는 내용입니다."**
+    - Do NOT make up information or fabricate answers.
+
+3. **Accuracy and Verifiability:**
     - Do not invent or modify numerical values, formulas, or terminology.
     - If information is insufficient, clearly state the lack of information instead of attempting to infer.
 
-3. **Response Composition Format:**
+4. **Response Composition Format:**
     - Respond with a clear structure (headings, paragraphs, lists, tables, etc.) using MARKDOWN.
     - If symbols or formulas are included, you must use LaTeX inline math mode ($...$).
 
-4. **Consistent Narrative Style:**
+5. **Source Attribution:**
+    - **ONLY IF** you reference specific information from [RECENT_DIALOG], include the original SOURCE tags if they exist.
+    - **NEVER fabricate** file names or page numbers.
+    - If responding with general knowledge, do NOT include SOURCE tags.
+
+6. **Consistent Narrative Style:**
     - Maintain contextual consistency, including logical transitions between paragraphs.
     - Respond directly to the user's question and exclude unnecessary narratives, creative writing, or emotional expressions.
 """
