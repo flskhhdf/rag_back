@@ -78,10 +78,10 @@ class RAGPipeline:
             logger.info(f"[NEW QUERY] PDF: {filename}, Query: {query}")
             logger.info("-"*80)
 
-            # 1. 대화 히스토리 포맷팅
+            # 1. 대화 히스토리 포맷팅 (최근 6턴 = 12개 메시지)
             prior_dialog = ""
             if chat_history:
-                recent = chat_history[-4:]
+                recent = chat_history[-12:]
                 prior_dialog = "\n".join([
                     f"{msg.get('role', 'user')}: {msg.get('content', '')[:200]}"
                     for msg in recent

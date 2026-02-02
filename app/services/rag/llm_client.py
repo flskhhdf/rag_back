@@ -97,10 +97,10 @@ def build_rag_prompt(
     else:
         context_text = ""
     
-    # 대화 이력 포맷팅
+    # 대화 이력 포맷팅 (최근 6턴 = 12개 메시지)
     history_text = ""
     if history:
-        recent_history = history[-6:]
+        recent_history = history[-12:]
         history_parts = []
         for msg in recent_history:
             role = "사용자" if msg.get("role") == "user" else "어시스턴트"
