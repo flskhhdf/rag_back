@@ -90,54 +90,47 @@ async def update_notebook(notebook_id: str, update: NotebookUpdate):
 
 
 @router.delete("/{notebook_id}")
-async def delete_notebook(notebook_id: str, delete_files: bool = True):
-    """노트북 삭제 (delete_files=True면 연결된 파일도 함께 삭제)"""
-    from pathlib import Path
-    from app.services.database import qdrant as qdrant_service
-    
+async def delete_notebook(notebook_id: str):
+    """
+    노트북 삭제 (파일은 유지, 링크만 끊음)
+
+    삭제되는 것:
+    - notebook 레코드
+    - notebook_file_link (파일 연결)
+    - chat_history (채팅 기록)
+
+    유지되는 것:
+    - file_info (파일 메타데이터)
+    - 파일시스템의 실제 파일
+    - Qdrant의 벡터 데이터
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # 노트북 존재 여부 확인
     existing = mysql_service.get_notebook_by_id(notebook_id)
     if not existing:
         raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
-    
-    deleted_files_count = 0
-    
-    if delete_files:
-        # 연결된 파일 목록 조회
-        files = mysql_service.get_files_by_notebook(notebook_id)
-        
-        for file in files:
-            file_id = file["id"]
-            file_path = file.get("file_path")
-            
-            # 1. Qdrant 컬렉션 삭제
-            try:
-                qdrant_service.delete_pdf(file_id)
-            except Exception as e:
-                print(f"[WARN] Qdrant 삭제 실패 ({file_id}): {e}")
-            
-            # 2. 파일시스템에서 삭제
-            if file_path:
-                try:
-                    pdf_path = Path(file_path)
-                    if pdf_path.exists():
-                        # 상위 디렉토리 (docling_output 포함) 삭제
-                        import shutil
-                        shutil.rmtree(pdf_path.parent, ignore_errors=True)
-                except Exception as e:
-                    print(f"[WARN] 파일시스템 삭제 실패 ({file_path}): {e}")
-            
-            # 3. file_info에서 삭제
-            mysql_service.delete_file_info(file_id)
-            deleted_files_count += 1
-    
-    # 노트북 삭제 (notebook_file_link도 함께 삭제됨)
+
+    logger.info(f"[NOTEBOOK] Deleting notebook: {notebook_id}")
+
+    # 1. 채팅 기록 삭제
+    try:
+        mysql_service.delete_chat_history(notebook_id)
+        logger.info(f"[NOTEBOOK] Deleted chat history for notebook: {notebook_id}")
+    except Exception as e:
+        logger.error(f"[NOTEBOOK] Failed to delete chat history: {e}")
+        # 에러가 나도 계속 진행
+
+    # 2. 노트북 삭제 (notebook_file_link도 CASCADE로 함께 삭제됨)
     success = mysql_service.delete_notebook(notebook_id)
     if not success:
         raise HTTPException(status_code=500, detail="노트북 삭제 실패")
-    
+
+    logger.info(f"[NOTEBOOK] Successfully deleted notebook: {notebook_id}")
+
     return {
-        "message": "노트북이 삭제되었습니다.",
-        "deleted_files_count": deleted_files_count
+        "message": "노트북이 삭제되었습니다. (연결된 파일은 유지됩니다)"
     }
 
 

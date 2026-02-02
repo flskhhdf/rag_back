@@ -209,3 +209,162 @@ async def stream_llm_response(
     except Exception as e:
         logger.error(f"LLM request failed: {e}")
         yield f"오류가 발생했습니다: {str(e)}"
+
+
+async def generate_follow_up_questions(
+    query: str,
+    answer: str,
+    top_k: int = 3,
+    model: str = None,
+    vllm_url: str = None
+) -> List[str]:
+    """후속 질문 생성
+
+    Args:
+        query: 원본 사용자 질문
+        answer: AI 답변 (전체 또는 요약)
+        top_k: 생성할 질문 개수 (기본값: 3)
+        model: LLM 모델명 (기본값: RAGConfig.FOLLOW_UP_LLM_MODEL)
+        vllm_url: vLLM 서버 URL (기본값: RAGConfig.FOLLOW_UP_LLM_URL)
+
+    Returns:
+        후속 질문 리스트: ["질문1", "질문2", "질문3"]
+    """
+    import json
+    import time
+
+    model = model or RAGConfig.FOLLOW_UP_LLM_MODEL
+    vllm_url = vllm_url or RAGConfig.FOLLOW_UP_LLM_URL
+
+    # 답변 요약 (너무 길면 잘라냄)
+    answer_summary = answer[:500] + "..." if len(answer) > 500 else answer
+
+    # 프롬프트 구성
+    prompt = f"""다음 대화를 바탕으로 사용자가 이어서 물어볼 만한 후속 질문 {top_k}개를 생성하세요.
+
+# 원본 질문
+{query}
+
+# AI 답변 (요약)
+{answer_summary}
+
+# 생성 규칙
+1. 총 {top_k}개의 질문 생성
+2. 다양한 각도에서 접근:
+   - 답변 내용을 더 깊이 파고드는 질문
+   - 관련된 다른 주제로 확장하는 질문
+   - 실용적 응용이나 예시를 묻는 질문
+3. 자연스러운 한국어 (원본 질문의 말투 따름)
+4. 질문은 명확하고 구체적이어야 함
+5. 각 질문은 20-40자 내외로 간결하게
+
+# 출력 형식 (JSON만)
+다음 형식으로만 출력하세요. 다른 설명이나 마크다운 코드블록 없이 JSON만 출력:
+
+{{
+  "questions": [
+    "질문 1",
+    "질문 2",
+    "질문 3"
+  ]
+}}
+"""
+
+    # Messages 구성
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant that generates follow-up questions in JSON format. Always output valid JSON without markdown code blocks."
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+
+    try:
+        start_time = time.time()
+        logger.info(f"[FOLLOW-UP] Using model: {model} at {vllm_url}")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 2000,
+                "temperature": 0.7,
+                "stream": False
+            }
+
+            response = await client.post(
+                f"{vllm_url}/v1/chat/completions",
+                json=payload,
+                timeout=30.0
+            )
+            response.raise_for_status()
+
+            # 응답 파싱
+            data = response.json()
+            logger.info(f"[FOLLOW-UP] Raw response: {json.dumps(data, ensure_ascii=False, indent=2)}")
+
+            # content 추출 with defensive checks
+            if not data.get("choices"):
+                logger.error("[FOLLOW-UP] No choices in response")
+                return []
+
+            message = data["choices"][0].get("message", {})
+            content = message.get("content")
+
+            # reasoning 모델인 경우 reasoning_content 또는 reasoning 필드 사용
+            if content is None:
+                logger.warning("[FOLLOW-UP] Content is None, checking reasoning fields...")
+                content = message.get("reasoning_content") or message.get("reasoning")
+
+                if content is None:
+                    logger.error(f"[FOLLOW-UP] No content in any field. Full message: {message}")
+                    return []
+                else:
+                    logger.info("[FOLLOW-UP] Using reasoning field instead of content")
+
+            content = content.strip()
+
+            if not content:
+                logger.error("[FOLLOW-UP] Content is empty after strip")
+                return []
+
+            logger.info(f"[FOLLOW-UP] LLM response content: {content[:500]}...")
+
+            # JSON 추출 - reasoning 텍스트 안에 JSON이 있을 수 있음
+            json_content = content
+
+            # 1. 직접 파싱 시도
+            try:
+                parsed = json.loads(json_content)
+            except json.JSONDecodeError:
+                # 2. JSON 부분만 추출 시도 (마크다운 코드블록 or reasoning 텍스트)
+                start_idx = json_content.find("{")
+                end_idx = json_content.rfind("}")
+
+                if start_idx != -1 and end_idx != -1:
+                    json_content = json_content[start_idx:end_idx+1]
+                    logger.info(f"[FOLLOW-UP] Extracted JSON from text: {json_content[:200]}...")
+                    parsed = json.loads(json_content)
+                else:
+                    raise ValueError(f"No JSON object found in content")
+            questions = parsed.get("questions", [])
+
+            elapsed = time.time() - start_time
+            logger.info(f"[FOLLOW-UP] Generated {len(questions)} questions in {elapsed:.2f}s")
+            logger.info(f"[FOLLOW-UP] Questions: {questions}")
+
+            return questions[:top_k]
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[FOLLOW-UP] JSON parsing failed: {e}")
+        logger.error(f"[FOLLOW-UP] Raw content: {content if 'content' in locals() else 'content not defined'}")
+        return []
+    except Exception as e:
+        logger.error(f"[FOLLOW-UP] Generation failed: {e}")
+        logger.error(f"[FOLLOW-UP] Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"[FOLLOW-UP] Traceback: {traceback.format_exc()}")
+        return []

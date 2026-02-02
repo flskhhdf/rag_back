@@ -3,12 +3,15 @@ MySQL 서비스 모듈 - 파일 메타데이터 관리
 """
 import os
 import hashlib
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 import pymysql
 from pymysql.cursors import DictCursor
+
+logger = logging.getLogger(__name__)
 
 
 # ===== Config =====
@@ -416,9 +419,13 @@ def create_chat_message(
                 VALUES (%s, %s, %s, %s, %s)
             """
             cursor.execute(sql, (message_id, notebook_id, role, content, metadata))
+            logger.info(f"[DB] Saved chat message: {message_id} ({role}) to notebook {notebook_id}")
             return True
     except Exception as e:
-        print(f"[ERROR] create_chat_message: {e}")
+        logger.error(f"[DB] Failed to save chat message: {e}")
+        logger.error(f"[DB] Message details - notebook_id: {notebook_id}, role: {role}, content_len: {len(content)}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
         return False
 
 
@@ -447,9 +454,14 @@ def get_chat_history(
                 LIMIT %s OFFSET %s
             """
             cursor.execute(sql, (notebook_id, limit, offset))
-            return cursor.fetchall()
+            results = cursor.fetchall()
+            logger.info(f"[DB] Retrieved {len(results)} chat messages for notebook {notebook_id}")
+            return results
     except Exception as e:
-        print(f"[ERROR] get_chat_history: {e}")
+        logger.error(f"[DB] Failed to get chat history: {e}")
+        logger.error(f"[DB] notebook_id: {notebook_id}, limit: {limit}, offset: {offset}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
         return []
 
 

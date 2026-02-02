@@ -48,7 +48,7 @@ class JinaReranker:
         # Jina 공식 API: AutoModel 사용
         self.model = AutoModel.from_pretrained(
             model_name,
-            torch_dtype="auto",
+            dtype="auto",
             trust_remote_code=True,
         )
         self.model.to(self.device)
@@ -204,6 +204,14 @@ def rerank_results(
     
     for i, score in enumerate(scores):
         results[i]["rerank_score"] = float(score)
+    
+    # 점수 통계 로깅
+    if scores:
+        min_score = min(scores)
+        max_score = max(scores)
+        avg_score = sum(scores) / len(scores)
+        logger.info(f"[RERANK SCORES] Min: {min_score:.4f}, Max: {max_score:.4f}, Avg: {avg_score:.4f}")
+        logger.info(f"[RERANK SCORES] All scores: {[f'{s:.4f}' for s in sorted(scores, reverse=True)[:10]]}")
     
     reranked = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
     filtered = [r for r in reranked if r.get("rerank_score", 0) >= RAGConfig.RERANK_THRESHOLD]
