@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from pydantic import BaseModel
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 
 
@@ -87,6 +89,7 @@ class ChatHistoryMessage(BaseModel):
     content: str
     metadata: Optional[dict] = None
     created_at: Optional[datetime] = None
+    feedback: Optional[FeedbackInfo] = None  # 피드백 정보 (있을 경우)
 
 
 class ChatHistoryResponse(BaseModel):
@@ -114,3 +117,47 @@ class TaskStatusResponse(BaseModel):
     chunk_count: Optional[int] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+# ===== Feedback Schemas =====
+
+class FeedbackSource(BaseModel):
+    """피드백에 포함된 소스 정보 (RAG 검색 결과)"""
+    text: str
+    expanded_text: Optional[str] = None
+    rerank_score: Optional[float] = None
+    rrf_score: Optional[float] = None
+    metadata: Optional[dict] = None  # filename, page_no, chunk_index
+
+
+class FeedbackCreate(BaseModel):
+    """피드백 생성 요청"""
+    message_id: str  # assistant 메시지의 ID
+    is_positive: bool  # True=👍, False=👎
+    comment: Optional[str] = None
+
+
+class FeedbackUpdate(BaseModel):
+    """피드백 수정 요청"""
+    is_positive: Optional[bool] = None
+    comment: Optional[str] = None
+
+
+class FeedbackInfo(BaseModel):
+    """피드백 정보 (응답용)"""
+    feedback_id: str
+    message_id: str
+    notebook_id: str
+    is_positive: bool
+    comment: Optional[str] = None
+    question_content: str
+    answer_content: str
+    sources: Optional[list[FeedbackSource]] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class FeedbackListResponse(BaseModel):
+    """피드백 목록 응답"""
+    feedbacks: list[FeedbackInfo]
+    total_count: Optional[int] = None

@@ -89,12 +89,21 @@ def get_file_by_id(file_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_file_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
-    """해시로 파일 조회 (중복 체크용)"""
+def get_file_by_hash(file_hash: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """해시로 파일 조회 (중복 체크용)
+
+    Args:
+        file_hash: 파일 해시
+        user_id: 사용자 ID (선택, 제공되면 해당 사용자의 파일만 검색)
+    """
     try:
         with get_cursor() as cursor:
-            sql = "SELECT * FROM file_info WHERE file_hash = %s LIMIT 1"
-            cursor.execute(sql, (file_hash,))
+            if user_id:
+                sql = "SELECT * FROM file_info WHERE file_hash = %s AND uploaded_by = %s LIMIT 1"
+                cursor.execute(sql, (file_hash, user_id))
+            else:
+                sql = "SELECT * FROM file_info WHERE file_hash = %s LIMIT 1"
+                cursor.execute(sql, (file_hash,))
             return cursor.fetchone()
     except Exception as e:
         print(f"[ERROR] get_file_by_hash: {e}")
@@ -516,7 +525,7 @@ def delete_chat_history(notebook_id: str) -> bool:
 
 def delete_chat_message(message_id: str) -> bool:
     """특정 채팅 메시지 삭제
-    
+
     Args:
         message_id: 메시지 ID
     """
@@ -529,3 +538,339 @@ def delete_chat_message(message_id: str) -> bool:
         print(f"[ERROR] delete_chat_message: {e}")
         return False
 
+
+# ===== Chat Feedback CRUD =====
+
+def create_feedback(
+    feedback_id: str,
+    message_id: str,
+    notebook_id: str,
+    is_positive: bool,
+    comment: Optional[str] = None,
+    question_content: str = "",
+    answer_content: str = "",
+    sources: Optional[str] = None,
+) -> bool:
+    """피드백 생성 또는 업데이트 (UPSERT)
+
+    Args:
+        feedback_id: 피드백 ID (UUID)
+        message_id: 메시지 ID (chat_history FK)
+        notebook_id: 노트북 ID
+        is_positive: 긍정적 피드백 여부 (True=👍, False=👎)
+        comment: 추가 코멘트 (선택)
+        question_content: 질문 내용 (저장용)
+        answer_content: 답변 내용 (저장용)
+        sources: RAG 소스 JSON 문자열 (선택)
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = """
+                INSERT INTO chat_feedback
+                (id, message_id, notebook_id, is_positive, comment,
+                 question_content, answer_content, sources)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    is_positive = VALUES(is_positive),
+                    comment = VALUES(comment),
+                    updated_at = CURRENT_TIMESTAMP
+            """
+            cursor.execute(sql, (
+                feedback_id, message_id, notebook_id, is_positive,
+                comment, question_content, answer_content, sources
+            ))
+            logger.info(f"[DB] Saved feedback: {feedback_id} for message {message_id}")
+            return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to save feedback: {e}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
+        return False
+
+
+def get_feedback_by_message_id(message_id: str) -> Optional[Dict[str, Any]]:
+    """메시지 ID로 피드백 조회
+
+    Args:
+        message_id: 메시지 ID
+
+    Returns:
+        피드백 정보 또는 None
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = "SELECT * FROM chat_feedback WHERE message_id = %s"
+            cursor.execute(sql, (message_id,))
+            return cursor.fetchone()
+    except Exception as e:
+        logger.error(f"[DB] Failed to get feedback by message_id: {e}")
+        return None
+
+
+def get_feedback_by_id(feedback_id: str) -> Optional[Dict[str, Any]]:
+    """피드백 ID로 조회
+
+    Args:
+        feedback_id: 피드백 ID
+
+    Returns:
+        피드백 정보 또는 None
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = "SELECT * FROM chat_feedback WHERE id = %s"
+            cursor.execute(sql, (feedback_id,))
+            return cursor.fetchone()
+    except Exception as e:
+        logger.error(f"[DB] Failed to get feedback by id: {e}")
+        return None
+
+
+def update_feedback(
+    feedback_id: str,
+    is_positive: Optional[bool] = None,
+    comment: Optional[str] = None,
+) -> bool:
+    """피드백 수정 (thumbs up/down 변경 또는 코멘트 수정)
+
+    Args:
+        feedback_id: 피드백 ID
+        is_positive: 긍정적 피드백 여부 (선택)
+        comment: 코멘트 (선택)
+
+    Returns:
+        성공 여부
+    """
+    try:
+        with get_cursor() as cursor:
+            updates = []
+            params = []
+
+            if is_positive is not None:
+                updates.append("is_positive = %s")
+                params.append(is_positive)
+
+            if comment is not None:
+                updates.append("comment = %s")
+                params.append(comment)
+
+            if not updates:
+                return False
+
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(feedback_id)
+
+            sql = f"UPDATE chat_feedback SET {', '.join(updates)} WHERE id = %s"
+            cursor.execute(sql, tuple(params))
+            logger.info(f"[DB] Updated feedback: {feedback_id}")
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"[DB] Failed to update feedback: {e}")
+        return False
+
+
+def get_feedbacks_by_notebook(
+    notebook_id: str,
+    is_positive: Optional[bool] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """노트북의 피드백 목록 조회 (분석용)
+
+    Args:
+        notebook_id: 노트북 ID
+        is_positive: 필터링 (None=전체, True=긍정만, False=부정만)
+        limit: 최대 조회 개수
+        offset: 오프셋
+
+    Returns:
+        피드백 목록
+    """
+    try:
+        with get_cursor() as cursor:
+            if is_positive is not None:
+                sql = """
+                    SELECT * FROM chat_feedback
+                    WHERE notebook_id = %s AND is_positive = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(sql, (notebook_id, is_positive, limit, offset))
+            else:
+                sql = """
+                    SELECT * FROM chat_feedback
+                    WHERE notebook_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(sql, (notebook_id, limit, offset))
+            return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"[DB] Failed to get feedbacks by notebook: {e}")
+        return []
+
+
+def delete_feedback(feedback_id: str) -> bool:
+    """피드백 삭제
+
+    Args:
+        feedback_id: 피드백 ID
+
+    Returns:
+        성공 여부
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = "DELETE FROM chat_feedback WHERE id = %s"
+            cursor.execute(sql, (feedback_id,))
+            logger.info(f"[DB] Deleted feedback: {feedback_id}")
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"[DB] Failed to delete feedback: {e}")
+        return False
+
+
+def get_qa_pair_by_message_id(message_id: str) -> Optional[Dict[str, Any]]:
+    """Assistant 메시지 ID로 Q&A 페어 조회
+
+    Args:
+        message_id: Assistant 메시지 ID
+
+    Returns:
+        {
+            "question": {"id": "...", "content": "...", ...},
+            "answer": {"id": "...", "content": "...", "metadata": {...}},
+            "notebook_id": "..."
+        }
+        또는 None
+    """
+    try:
+        with get_cursor() as cursor:
+            # 1. Assistant 메시지 조회
+            cursor.execute(
+                "SELECT * FROM chat_history WHERE id = %s AND role = 'assistant'",
+                (message_id,)
+            )
+            answer = cursor.fetchone()
+
+            if not answer:
+                logger.warning(f"[DB] Message {message_id} not found or not an assistant message")
+                return None
+
+            # 2. 직전 User 메시지 조회
+            cursor.execute("""
+                SELECT * FROM chat_history
+                WHERE notebook_id = %s
+                  AND role = 'user'
+                  AND created_at < %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (answer["notebook_id"], answer["created_at"]))
+
+            question = cursor.fetchone()
+
+            if not question:
+                logger.warning(f"[DB] No question found for answer {message_id}")
+                return None
+
+            return {
+                "question": question,
+                "answer": answer,
+                "notebook_id": answer["notebook_id"],
+            }
+    except Exception as e:
+        logger.error(f"[DB] Failed to get Q&A pair: {e}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
+        return None
+
+
+def get_chat_history_with_feedback(
+    notebook_id: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """채팅 기록과 피드백을 함께 조회
+
+    Args:
+        notebook_id: 노트북 ID
+        limit: 최대 조회 개수
+        offset: 오프셋
+
+    Returns:
+        채팅 메시지 리스트 (피드백 정보 포함)
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = """
+                SELECT
+                    ch.id, ch.notebook_id, ch.role, ch.content,
+                    ch.metadata, ch.created_at,
+                    cf.id as feedback_id, cf.is_positive, cf.comment,
+                    cf.created_at as feedback_created_at, cf.updated_at as feedback_updated_at
+                FROM chat_history ch
+                LEFT JOIN chat_feedback cf ON ch.id = cf.message_id
+                WHERE ch.notebook_id = %s
+                ORDER BY ch.created_at ASC
+                LIMIT %s OFFSET %s
+            """
+            cursor.execute(sql, (notebook_id, limit, offset))
+            return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"[DB] Failed to get chat history with feedback: {e}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
+        return []
+
+
+# ===== Config Prompt Management =====
+
+def get_config_prompt(config_type: str) -> Optional[str]:
+    """Config 테이블에서 프롬프트 조회
+    
+    Args:
+        config_type: 프롬프트 타입 (예: 'follow_up', 'example_q' 등)
+    
+    Returns:
+        프롬프트 문자열 또는 None
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = "SELECT prompt FROM config WHERE type = %s"
+            cursor.execute(sql, (config_type,))
+            result = cursor.fetchone()
+            return result['prompt'] if result else None
+    except Exception as e:
+        logger.error(f"[DB] Failed to get config prompt: {e}")
+        return None
+
+
+def set_config_prompt(config_type: str, prompt: str) -> bool:
+    """Config 프롬프트 설정 (INSERT or UPDATE)
+    
+    Args:
+        config_type: 프롬프트 타입
+        prompt: 프롬프트 내용
+    
+    Returns:
+        성공 여부
+    """
+    try:
+        with get_cursor() as cursor:
+            # 기존 레코드 확인
+            cursor.execute("SELECT id FROM config WHERE type = %s", (config_type,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # UPDATE
+                sql = "UPDATE config SET prompt = %s WHERE type = %s"
+                cursor.execute(sql, (prompt, config_type))
+            else:
+                # INSERT
+                sql = "INSERT INTO config (type, prompt) VALUES (%s, %s)"
+                cursor.execute(sql, (config_type, prompt))
+            
+            return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to set config prompt: {e}")
+        return False
