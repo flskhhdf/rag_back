@@ -49,8 +49,8 @@ async def create_pdf(
     # 파일 해시 계산 (중복 체크용)
     file_hash = mysql_service.calculate_file_hash(content)
 
-    # 중복 파일 체크
-    existing_file = mysql_service.get_file_by_hash(file_hash)
+    # 중복 파일 체크 (같은 사용자가 올린 파일만 체크)
+    existing_file = mysql_service.get_file_by_hash(file_hash, user_id)
     if existing_file:
         return PDFUploadResponse(
             pdf_id=existing_file["id"],
