@@ -822,3 +822,55 @@ def get_chat_history_with_feedback(
         logger.error(f"[DB] Traceback: {traceback.format_exc()}")
         return []
 
+
+# ===== Config Prompt Management =====
+
+def get_config_prompt(config_type: str) -> Optional[str]:
+    """Config 테이블에서 프롬프트 조회
+    
+    Args:
+        config_type: 프롬프트 타입 (예: 'follow_up', 'example_q' 등)
+    
+    Returns:
+        프롬프트 문자열 또는 None
+    """
+    try:
+        with get_cursor() as cursor:
+            sql = "SELECT prompt FROM config WHERE type = %s"
+            cursor.execute(sql, (config_type,))
+            result = cursor.fetchone()
+            return result['prompt'] if result else None
+    except Exception as e:
+        logger.error(f"[DB] Failed to get config prompt: {e}")
+        return None
+
+
+def set_config_prompt(config_type: str, prompt: str) -> bool:
+    """Config 프롬프트 설정 (INSERT or UPDATE)
+    
+    Args:
+        config_type: 프롬프트 타입
+        prompt: 프롬프트 내용
+    
+    Returns:
+        성공 여부
+    """
+    try:
+        with get_cursor() as cursor:
+            # 기존 레코드 확인
+            cursor.execute("SELECT id FROM config WHERE type = %s", (config_type,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # UPDATE
+                sql = "UPDATE config SET prompt = %s WHERE type = %s"
+                cursor.execute(sql, (prompt, config_type))
+            else:
+                # INSERT
+                sql = "INSERT INTO config (type, prompt) VALUES (%s, %s)"
+                cursor.execute(sql, (config_type, prompt))
+            
+            return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to set config prompt: {e}")
+        return False

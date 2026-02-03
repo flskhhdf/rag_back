@@ -95,29 +95,30 @@ async def create_chat_message(
         ):
             logger.error(f"[CHAT] Failed to save assistant message to DB for notebook {notebook_id}")
 
-        # 3. 후속 질문 생성 (주석 처리: 로그가 너무 길어짐)
-        # if RAGConfig.ENABLE_FOLLOW_UP_QUESTIONS and assistant_response.strip():
-        #     try:
-        #         logger.info("[FOLLOW-UP] Starting follow-up question generation")
-        #         follow_up_questions = await generate_follow_up_questions(
-        #             query=request.message,
-        #             answer=assistant_response,
-        #             top_k=RAGConfig.FOLLOW_UP_QUESTIONS_COUNT
-        #         )
-        #
-        #         if follow_up_questions:
-        #             logger.info(f"[FOLLOW-UP] Generated {len(follow_up_questions)} questions")
-        #             yield {
-        #                 "event": "follow_up",
-        #                 "data": json.dumps({
-        #                     "questions": follow_up_questions
-        #                 }, ensure_ascii=False)
-        #             }
-        #         else:
-        #             logger.warning("[FOLLOW-UP] No questions generated")
-        #
-        #     except Exception as e:
-        #         logger.error(f"[FOLLOW-UP] Failed to generate follow-up questions: {e}")
+        # 3. 후속 질문 생성
+        if RAGConfig.ENABLE_FOLLOW_UP_QUESTIONS and assistant_response.strip():
+            try:
+                logger.info("[FOLLOW-UP] Starting follow-up question generation")
+                follow_up_questions = await generate_follow_up_questions(
+                    query=request.message,
+                    answer=assistant_response,
+                    top_k=RAGConfig.FOLLOW_UP_QUESTIONS_COUNT
+                )
+
+                if follow_up_questions:
+                    logger.info(f"[FOLLOW-UP] Generated {len(follow_up_questions)} questions")
+                    yield {
+                        "event": "follow_up",
+                        "data": json.dumps({
+                            "questions": follow_up_questions
+                        }, ensure_ascii=False)
+                    }
+                else:
+                    logger.warning("[FOLLOW-UP] No questions generated")
+
+            except Exception as e:
+                logger.error(f"[FOLLOW-UP] Failed to generate follow-up questions: {e}")
+
         #         # 에러 발생해도 답변은 이미 전송되었으므로 계속 진행
 
     return EventSourceResponse(event_generator())

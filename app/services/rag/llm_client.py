@@ -239,36 +239,22 @@ async def generate_follow_up_questions(
     # 답변 요약 (너무 길면 잘라냄)
     answer_summary = answer[:500] + "..." if len(answer) > 500 else answer
 
-    # 프롬프트 구성
-    prompt = f"""다음 대화를 바탕으로 사용자가 이어서 물어볼 만한 후속 질문 {top_k}개를 생성하세요.
+    # DB에서 프롬프트 가져오기 (필수)
+    from app.services.database.mysql import get_config_prompt
+    
+    prompt_template = get_config_prompt("follow_up")
+    
+    # DB 프롬프트가 없으면 에러
+    if not prompt_template:
+        logger.error("[FOLLOW-UP] No prompt found in DB (type='follow_up')")
+        raise ValueError("Follow-up prompt not configured in database. Please set prompt in config table.")
+    
+    logger.info("[FOLLOW-UP] Using prompt from DB")
+    
+    # answer_summary만 대치
+    prompt = prompt_template.replace("{answer_summary}", answer_summary)
 
-# 원본 질문
-{query}
 
-# AI 답변 (요약)
-{answer_summary}
-
-# 생성 규칙
-1. 총 {top_k}개의 질문 생성
-2. 다양한 각도에서 접근:
-   - 답변 내용을 더 깊이 파고드는 질문
-   - 관련된 다른 주제로 확장하는 질문
-   - 실용적 응용이나 예시를 묻는 질문
-3. 자연스러운 한국어 (원본 질문의 말투 따름)
-4. 질문은 명확하고 구체적이어야 함
-5. 각 질문은 20-40자 내외로 간결하게
-
-# 출력 형식 (JSON만)
-다음 형식으로만 출력하세요. 다른 설명이나 마크다운 코드블록 없이 JSON만 출력:
-
-{{
-  "questions": [
-    "질문 1",
-    "질문 2",
-    "질문 3"
-  ]
-}}
-"""
 
     # Messages 구성
     messages = [
