@@ -22,8 +22,8 @@ except Exception:
 
 
 # ===== Config =====
-EMBED_TYPE = os.getenv("EMBED_TYPE", "huggingface")
-DENSE_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
+EMBED_TYPE = os.getenv("EMBED_TYPE", "vllm")
+DENSE_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
 
@@ -276,14 +276,14 @@ def upsert_chunks(
             metadata = {k: v for k, v in chunk_dict.items()
                        if k not in ["page_content", "content", "content_for_llm"]}
 
-        # content_for_llm을 raw_text로 저장 (LLM 응답 생성용)
+        # content_for_llm을 metadata에 저장 (LLM 응답 생성용)
         content_for_llm = chunk_dict.get("content_for_llm")
         if content_for_llm:
-            metadata["raw_text"] = content_for_llm
+            metadata["content_for_llm"] = content_for_llm
         else:
-            # 기존 방식: display_content를 raw_text로 변환
+            # 기존 방식: display_content를 content_for_llm로 변환 (fallback)
             display_content = metadata.pop("display_content", None) or page_content
-            metadata["raw_text"] = display_content
+            metadata["content_for_llm"] = display_content
 
         # 추가 필드 (기존 필드 유지)
         metadata["pdf_id"] = pdf_id
@@ -292,13 +292,10 @@ def upsert_chunks(
         metadata["uploaded_at"] = datetime.now().isoformat()
         metadata["collection_name"] = collection_name
 
-        # doc_id 생성 (우선순위: chunk_id > doc_id > 자동 생성)
-        if "doc_id" not in metadata:
-            # chunk_id가 있으면 사용 (complete_chunker), 없으면 자동 생성
-            doc_id = metadata.get("chunk_id") or _build_doc_id(pdf_id, i)
-            metadata["doc_id"] = doc_id
-        else:
-            doc_id = metadata["doc_id"]
+        # doc_id 생성 (RRF fusion 중복 제거를 위해 pdf_id + chunk_index 기반)
+        # chunk_id는 각 청크의 고유 ID로 유지, doc_id는 문서 레벨 식별자
+        doc_id = _build_doc_id(pdf_id, i)
+        metadata["doc_id"] = doc_id
         
         point_id = _stable_point_id(doc_id, page_content)
 

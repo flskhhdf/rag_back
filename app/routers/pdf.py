@@ -151,32 +151,48 @@ async def delete_pdf(pdf_id: str):
     3. MySQL에서 파일 정보 삭제
     4. 파일 시스템에서 디렉토리 삭제
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[DELETE] Starting deletion for pdf_id={pdf_id}")
+
     # 1. MySQL에서 파일 정보 조회
     file_info = mysql_service.get_file_by_id(pdf_id)
 
     if not file_info:
+        logger.warning(f"[DELETE] PDF not found in DB: pdf_id={pdf_id}")
         raise HTTPException(status_code=404, detail="PDF를 찾을 수 없습니다.")
 
     filename = file_info["file_name"]
     file_path = file_info.get("file_path")
+    logger.info(f"[DELETE] Found file info: filename={filename}, file_path={file_path}")
 
     errors = []
 
     # 2. Qdrant에서 컬렉션 삭제
     try:
+        logger.info(f"[DELETE] Deleting from Qdrant: pdf_id={pdf_id}")
         qdrant_deleted = qdrant_service.delete_pdf(pdf_id, filename)
         if not qdrant_deleted:
             errors.append("Qdrant 컬렉션 삭제 실패")
+            logger.error(f"[DELETE] Qdrant deletion failed for pdf_id={pdf_id}")
+        else:
+            logger.info(f"[DELETE] Qdrant deletion successful for pdf_id={pdf_id}")
     except Exception as e:
         errors.append(f"Qdrant 삭제 중 오류: {str(e)}")
+        logger.error(f"[DELETE] Qdrant deletion error: {e}", exc_info=True)
 
     # 3. MySQL에서 파일 정보 삭제 (notebook_file_link와 file_info)
     try:
+        logger.info(f"[DELETE] Deleting from MySQL: pdf_id={pdf_id}")
         mysql_deleted = mysql_service.delete_file_info(pdf_id)
         if not mysql_deleted:
             errors.append("MySQL 파일 정보 삭제 실패")
+            logger.error(f"[DELETE] MySQL deletion returned False for pdf_id={pdf_id}")
+        else:
+            logger.info(f"[DELETE] MySQL deletion successful for pdf_id={pdf_id}")
     except Exception as e:
         errors.append(f"MySQL 삭제 중 오류: {str(e)}")
+        logger.error(f"[DELETE] MySQL deletion error: {e}", exc_info=True)
 
     # 4. 파일 시스템에서 삭제
     if file_path:

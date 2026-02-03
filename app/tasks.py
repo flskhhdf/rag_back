@@ -125,6 +125,19 @@ def process_pdf_task(
         if not chunks_data:
             raise ValueError("PDF에서 청크를 생성할 수 없습니다.")
 
+        # Chunking 결과를 JSON으로 저장 (디버깅 및 백업용)
+        import json
+        chunks_json_path = output_path / f"{Path(filename).stem}_chunks.json"
+        try:
+            with open(chunks_json_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'metadata': metadata,
+                    'chunks': chunks_data,
+                }, f, ensure_ascii=False, indent=2)
+            log.info(f"Chunks JSON saved: {chunks_json_path}")
+        except Exception as e:
+            log.warning(f"Failed to save chunks JSON: {e}")
+
         # 상태 업데이트: Qdrant 업로드 중
         self.update_state(
             state='PROCESSING',

@@ -116,11 +116,23 @@ def delete_file_info(file_id: str) -> bool:
         with get_cursor() as cursor:
             # notebook_file_link에서 먼저 삭제 (FK 제약)
             cursor.execute("DELETE FROM notebook_file_link WHERE file_id = %s", (file_id,))
+            link_deleted = cursor.rowcount
+            logger.info(f"[DB] Deleted {link_deleted} notebook_file_link records for file_id={file_id}")
+
             # file_info에서 삭제
             cursor.execute("DELETE FROM file_info WHERE id = %s", (file_id,))
+            file_deleted = cursor.rowcount
+            logger.info(f"[DB] Deleted {file_deleted} file_info records for file_id={file_id}")
+
+            if file_deleted == 0:
+                logger.warning(f"[DB] No file_info record found with id={file_id}")
+                return False
+
             return True
     except Exception as e:
-        print(f"[ERROR] delete_file_info: {e}")
+        logger.error(f"[DB] Failed to delete_file_info: {e}")
+        import traceback
+        logger.error(f"[DB] Traceback: {traceback.format_exc()}")
         return False
 
 
