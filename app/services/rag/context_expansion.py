@@ -34,14 +34,14 @@ def fetch_neighbor_chunks(
 
         from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Range
 
-        # 한 번의 쿼리로 범위 검색
+        # 한 번의 쿼리로 범위 검색 (LangChain metadata 구조 고려)
         results = client.scroll(
             collection_name=collection_name,
             scroll_filter=Filter(
                 must=[
-                    FieldCondition(key="pdf_id", match=MatchValue(value=pdf_id)),
+                    FieldCondition(key="metadata.pdf_id", match=MatchValue(value=pdf_id)),
                     FieldCondition(
-                        key="chunk_index",
+                        key="metadata.chunk_index",
                         range=Range(gte=min_index, lte=max_index)
                     )
                 ]
@@ -53,7 +53,11 @@ def fetch_neighbor_chunks(
 
         neighbors = []
         for point in results[0]:
-            point_chunk_index = point.payload.get("chunk_index")
+            # LangChain metadata 구조에서 chunk_index 추출
+            point_chunk_index = (
+                point.payload.get("metadata", {}).get("chunk_index") or
+                point.payload.get("chunk_index")
+            )
 
             # 현재 청크는 제외
             if point_chunk_index == chunk_index:
@@ -61,7 +65,11 @@ def fetch_neighbor_chunks(
 
             offset = point_chunk_index - chunk_index
             neighbors.append({
-                "text": point.payload.get("page_content", point.payload.get("text", "")),
+                "text": (
+                    point.payload.get("metadata", {}).get("content_for_llm") or
+                    point.payload.get("content_for_llm") or
+                    point.payload.get("page_content", point.payload.get("text", ""))
+                ),
                 "chunk_index": point_chunk_index,
                 "offset": offset
             })

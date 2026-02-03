@@ -319,24 +319,45 @@ async def generate_follow_up_questions(
 
             logger.info(f"[FOLLOW-UP] LLM response content: {content[:500]}...")
 
-            # JSON 추출 - reasoning 텍스트 안에 JSON이 있을 수 있음
+            # JSON 추출 시도
             json_content = content
+            questions = []
 
-            # 1. 직접 파싱 시도
+            # 1. JSON 파싱 시도
             try:
                 parsed = json.loads(json_content)
+                questions = parsed.get("questions", [])
+                logger.info("[FOLLOW-UP] Successfully parsed JSON format")
             except json.JSONDecodeError:
-                # 2. JSON 부분만 추출 시도 (마크다운 코드블록 or reasoning 텍스트)
+                # 2. JSON 부분만 추출 시도
                 start_idx = json_content.find("{")
                 end_idx = json_content.rfind("}")
 
                 if start_idx != -1 and end_idx != -1:
-                    json_content = json_content[start_idx:end_idx+1]
-                    logger.info(f"[FOLLOW-UP] Extracted JSON from text: {json_content[:200]}...")
-                    parsed = json.loads(json_content)
+                    try:
+                        json_content = json_content[start_idx:end_idx+1]
+                        logger.info(f"[FOLLOW-UP] Extracted JSON from text: {json_content[:200]}...")
+                        parsed = json.loads(json_content)
+                        questions = parsed.get("questions", [])
+                        logger.info("[FOLLOW-UP] Successfully parsed extracted JSON")
+                    except json.JSONDecodeError:
+                        pass  # Fall through to numbered list parsing
+
+            # 3. Numbered list 파싱 (fallback)
+            if not questions:
+                logger.info("[FOLLOW-UP] JSON parsing failed, trying numbered list format")
+                import re
+                # 패턴: "1. Question\n2. Question\n3. Question"
+                pattern = r'^\s*\d+\.\s*(.+?)(?=\n\s*\d+\.|$)'
+                matches = re.findall(pattern, content, re.MULTILINE | re.DOTALL)
+                
+                if matches:
+                    questions = [m.strip() for m in matches if m.strip()]
+                    logger.info(f"[FOLLOW-UP] Parsed {len(questions)} questions from numbered list")
                 else:
-                    raise ValueError(f"No JSON object found in content")
-            questions = parsed.get("questions", [])
+                    logger.error("[FOLLOW-UP] Failed to parse both JSON and numbered list")
+                    logger.error(f"[FOLLOW-UP] Content preview: {content[:200]}")
+                    return []
 
             elapsed = time.time() - start_time
             logger.info(f"[FOLLOW-UP] Generated {len(questions)} questions in {elapsed:.2f}s")

@@ -10,7 +10,7 @@ class RAGConfig:
     
     # Embedding
     EMBED_TYPE = os.getenv("EMBED_TYPE", "vllm")  # "vllm", "ollama", or "huggingface"
-    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
     SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
     OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # For ollama embeddings
     VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8004")  # For vLLM embeddings
@@ -21,9 +21,10 @@ class RAGConfig:
     TOP_K_FINAL = int(os.getenv("TOP_K_FINAL", "5"))
     
     # Reranking
-    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "jina" or "crossencoder"
+    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "jina", "qwen", or "crossencoder"
     RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
     JINA_RERANKER_MODEL = os.getenv("JINA_RERANKER_MODEL", "jinaai/jina-reranker-v3")  # For Jina Reranker
+    QWEN_RERANKER_MODEL = os.getenv("QWEN_RERANKER_MODEL", "Qwen/Qwen3-Reranker-8B")  # For Qwen Reranker
     RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # 필터링 임계값 (낮은 점수 제거)
     
     # Minimum Search Score (검색 결과 신뢰도 임계값)

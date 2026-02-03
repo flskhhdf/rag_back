@@ -1371,6 +1371,7 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self,
         pdf_path: Path,
         output_dir: Path,
+        original_filename: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         PDF를 한 번에 처리하여 청크 생성 (Docling → Chunks)
@@ -1378,6 +1379,7 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         Args:
             pdf_path: PDF 파일 경로
             output_dir: 출력 디렉토리 (assets 저장용)
+            original_filename: 원본 파일명 (없으면 pdf_path.name 사용)
 
         Returns:
             (chunks_list, metadata)
@@ -1388,13 +1390,23 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                 "source_file": str
             }
         """
+        # 원본 파일명 결정
+        if original_filename is None:
+            original_filename = pdf_path.name
+
+        # assets 디렉토리명: 원본 파일명 사용 (확장자 제외)
+        original_stem = Path(original_filename).stem
+        assets_dir = output_dir / f"{original_stem}_assets"
+
         # Step 1: Docling 처리
-        assets_dir = output_dir / f"{pdf_path.stem}_assets"
         doc_dict = self.convert_to_dict(pdf_path, assets_dir)
 
-        # 원본 파일명 추출
-        origin = doc_dict.get('origin', {})
-        source_filename = origin.get('filename', pdf_path.name)
+        # 원본 파일명 결정 (전달받은 original_filename 우선 사용)
+        if original_filename:
+            source_filename = original_filename
+        else:
+            origin = doc_dict.get('origin', {})
+            source_filename = origin.get('filename', pdf_path.name)
 
         # Step 2: 청킹
         chunks, source_filename = self.chunk_docling_dict(doc_dict, source_filename)
@@ -1623,8 +1635,12 @@ def process_pdf_to_chunks(
         tmp_pdf_path = Path(tmp_pdf.name)
 
     try:
-        # 청크 생성
-        chunks, metadata = chunker.process_pdf_to_chunks(tmp_pdf_path, output_dir)
+        # 청크 생성 (원본 파일명 전달)
+        chunks, metadata = chunker.process_pdf_to_chunks(
+            tmp_pdf_path,
+            output_dir,
+            original_filename=filename
+        )
         return chunks, metadata
 
     finally:
