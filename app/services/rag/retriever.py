@@ -425,6 +425,31 @@ async def dense_search(
         for i, hit in enumerate(results.points)
     ]
 
+    # 검색 분석: Dense 결과 전체 (search_analysis.log에 기록)
+    for i, result in enumerate(dense_results, 1):
+        full_text = result.get("text", "") 
+        score = result.get("score", 0)
+        payload = result.get("payload", {})
+
+        # pages는 배열 형태로 저장됨
+        pages = payload.get("metadata", {}).get("pages", [])
+        if pages and isinstance(pages, list):
+            page_no = f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0])
+        else:
+            page_no = "N/A"
+
+        logger.info(
+            f"Dense result {i}: score={score:.4f}, page={page_no}\n{full_text}",
+            event='dense_result',
+            event_type='search_analysis',
+            data={
+                "rank": i,
+                "score": score,
+                "page_no": page_no,
+                "full_text": full_text
+            }
+        )
+
     return dense_results
 
 
@@ -476,6 +501,31 @@ async def sparse_search(
             }
             for i, hit in enumerate(results.points)
         ]
+
+        # 검색 분석: Sparse 결과 전체 (search_analysis.log에 기록)
+        for i, result in enumerate(sparse_results, 1):
+            full_text = result.get("text", "")
+            score = result.get("score", 0)
+            payload = result.get("payload", {})
+
+            # pages는 배열 형태로 저장됨
+            pages = payload.get("metadata", {}).get("pages", [])
+            if pages and isinstance(pages, list):
+                page_no = f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0])
+            else:
+                page_no = "N/A"
+
+            logger.info(
+                f"Sparse result {i}: score={score:.4f}, page={page_no}\n{full_text}",
+                event='sparse_result',
+                event_type='search_analysis',
+                data={
+                    "rank": i,
+                    "score": score,
+                    "page_no": page_no,
+                    "full_text": full_text
+                }
+            )
 
         return sparse_results
 

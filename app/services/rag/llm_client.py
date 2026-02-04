@@ -7,6 +7,7 @@ from typing import List, Dict, AsyncGenerator, Tuple, Any
 import httpx
 
 from .config import RAGConfig, SYS_PROMPT, SYS_PROMPT_NO_CTX, CTX_TEMPLATE
+from .sleep_manager import get_sleep_manager
 from app.core.structured_logger import get_logger
 
 logger = get_logger(__name__)
@@ -152,10 +153,21 @@ async def stream_llm_response(
     """
     import json
     import time
+    import asyncio
 
     model = model or RAGConfig.LLM_MODEL
     vllm_url = vllm_url or RAGConfig.VLLM_URL
     max_tokens = max_tokens or RAGConfig.MAX_TOKENS
+
+    # 슬립 매니저: 모델이 슬립 중이면 깨우기
+    sleep_manager = get_sleep_manager()
+    if sleep_manager:
+        try:
+            # Race condition 방지: 시간 업데이트를 먼저 해서 백그라운드 태스크가 sleep 하지 않도록
+            sleep_manager.update_last_request_time()
+            await sleep_manager.ensure_active()
+        except Exception as e:
+            logger.warning(f"Sleep manager operation failed: {e}")
 
     try:
         start_time = time.time()
@@ -171,13 +183,31 @@ async def stream_llm_response(
                 "stream": False,  # 스트리밍 비활성화
             }
 
-            # 요청
-            response = await client.post(
-                f"{vllm_url}/v1/chat/completions",
-                json=payload,
-                timeout=240.0
-            )
-            response.raise_for_status()
+            # 요청 (500 에러 시 wake + 재시도)
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        f"{vllm_url}/v1/chat/completions",
+                        json=payload,
+                        timeout=240.0
+                    )
+                    response.raise_for_status()
+                    break  # 성공하면 루프 탈출
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 500 and attempt < max_retries - 1:
+                        # 500 에러이고 재시도 가능하면 wake 시도
+                        logger.warning(f"vLLM returned 500 error, attempting wake and retry (attempt {attempt + 1}/{max_retries})")
+                        if sleep_manager:
+                            try:
+                                await sleep_manager.wake()
+                                await asyncio.sleep(2)  # wake 후 잠시 대기
+                            except Exception as wake_error:
+                                logger.warning(f"Wake attempt failed: {wake_error}")
+                        continue
+                    else:
+                        # 재시도 불가능하거나 다른 에러이면 raise
+                        raise
 
             # 응답 파싱
             data = response.json()
@@ -268,6 +298,16 @@ async def generate_follow_up_questions(
         }
     ]
 
+    # 슬립 매니저: 모델이 슬립 중이면 깨우기 (follow-up용 모델이 별도인 경우는 스킵 가능)
+    sleep_manager = get_sleep_manager()
+    if sleep_manager:
+        try:
+            # Race condition 방지: 시간 업데이트를 먼저 해서 백그라운드 태스크가 sleep 하지 않도록
+            sleep_manager.update_last_request_time()
+            await sleep_manager.ensure_active()
+        except Exception as e:
+            logger.warning(f"Sleep manager operation failed: {e}")
+
     try:
         start_time = time.time()
         logger.info(f"[FOLLOW-UP] Using model: {model} at {vllm_url}")
@@ -277,7 +317,7 @@ async def generate_follow_up_questions(
                 "model": model,
                 "messages": messages,
                 "max_tokens": 2000,
-                "temperature": 0.7,
+                "temperature": 0.3,
                 "stream": False
             }
 
