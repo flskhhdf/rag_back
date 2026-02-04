@@ -59,8 +59,8 @@ def fetch_neighbor_chunks(
                 point.payload.get("chunk_index")
             )
 
-            # 현재 청크는 제외
-            if point_chunk_index == chunk_index:
+            # chunk_index가 없거나 현재 청크는 제외
+            if point_chunk_index is None or point_chunk_index == chunk_index:
                 continue
 
             offset = point_chunk_index - chunk_index
