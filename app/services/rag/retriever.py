@@ -3,7 +3,6 @@
 Retriever Module - 검색, RRF 융합, 리랭킹
 """
 import asyncio
-import logging
 import time
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
@@ -18,12 +17,12 @@ try:
     _HAS_TRANSFORMERS = True
 except ImportError:
     _HAS_TRANSFORMERS = False
-    logger.warning("transformers and torch not available. Advanced rerankers will not be available.")
 
 from .config import RAGConfig
 from .embeddings import embed_query, get_sparse_embeddings, has_sparse_support
+from app.core.structured_logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Reranker 싱글톤
 _reranker = None
@@ -289,15 +288,17 @@ def rrf_fusion(
 
     sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
 
-    # 디버깅: doc_id 중복 체크
-    logger.info(f"[RRF FUSION] Dense results: {len(dense_results)}, Sparse results: {len(sparse_results)}")
-    logger.info(f"[RRF FUSION] Unique doc_ids after fusion: {len(sorted_ids)}")
-
-    # 처음 5개의 doc_id 로깅
-    for i, doc_id in enumerate(sorted_ids[:5], 1):
-        result = result_map[doc_id]
-        text_preview = result.get("text", "")[:80] + "..."
-        logger.info(f"  [{i}] doc_id={doc_id} | score={scores[doc_id]:.4f} | text={text_preview}")
+    # RRF Fusion 결과 로깅
+    logger.debug_event(
+        "rrf_fusion",
+        "RRF fusion completed",
+        data={
+            "dense_results": len(dense_results),
+            "sparse_results": len(sparse_results),
+            "unique_docs": len(sorted_ids),
+            "top_scores": [scores[doc_id] for doc_id in sorted_ids[:5]]
+        }
+    )
 
     fused_results = []
     for doc_id in sorted_ids:
@@ -319,14 +320,15 @@ def rerank_results(
     if not results:
         return []
 
-    # 디버깅: 리랭킹 전 결과 확인
-    logger.info(f"[BEFORE RERANK] Total results: {len(results)}")
-    logger.info(f"[BEFORE RERANK] Unique doc_ids: {len(set(r.get('doc_id', 'N/A') for r in results))}")
-
-    # 처음 5개의 doc_id 로깅
-    for i, r in enumerate(results[:5], 1):
-        text_preview = r.get("text", "")[:80] + "..."
-        logger.info(f"  [{i}] doc_id={r.get('doc_id', 'N/A')} | rrf_score={r.get('rrf_score', 0):.4f} | text={text_preview}")
+    # 리랭킹 전 결과 로깅 (DEBUG)
+    logger.debug_event(
+        "before_rerank",
+        "Starting reranking",
+        data={
+            "total_results": len(results),
+            "unique_docs": len(set(r.get('doc_id', 'N/A') for r in results))
+        }
+    )
 
     reranker = get_reranker()
     
@@ -341,13 +343,30 @@ def rerank_results(
         min_score = min(scores)
         max_score = max(scores)
         avg_score = sum(scores) / len(scores)
-        logger.info(f"[RERANK SCORES] Min: {min_score:.4f}, Max: {max_score:.4f}, Avg: {avg_score:.4f}")
-        logger.info(f"[RERANK SCORES] All scores: {[f'{s:.4f}' for s in sorted(scores, reverse=True)[:10]]}")
-    
+
+        logger.debug_event(
+            "rerank_scores",
+            "Reranking scores statistics",
+            data={
+                "min": min_score,
+                "max": max_score,
+                "avg": avg_score,
+                "top_10_scores": sorted(scores, reverse=True)[:10]
+            }
+        )
+
     reranked = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
     filtered = [r for r in reranked if r.get("rerank_score", 0) >= RAGConfig.RERANK_THRESHOLD]
-    
-    logger.info(f"Reranked: {len(results)} -> {len(filtered)} (threshold: {RAGConfig.RERANK_THRESHOLD})")
+
+    logger.info_event(
+        "rerank_filtered",
+        f"Reranking filtered results",
+        data={
+            "input_count": len(results),
+            "output_count": len(filtered),
+            "threshold": RAGConfig.RERANK_THRESHOLD
+        }
+    )
     
     return filtered[:top_n] if filtered else reranked[:top_n]
 
@@ -365,7 +384,12 @@ async def dense_search(
     t_embed_start = time.time()
     query_embedding = await embed_query(query)
     t_embed = time.time() - t_embed_start
-    logger.info(f"    ↳ Dense embedding: {t_embed:.3f}s")
+
+    logger.debug_event(
+        "dense_embedding",
+        "Dense embedding generated",
+        duration_ms=t_embed * 1000
+    )
 
     # 2. 벡터 검색
     t_search_start = time.time()
@@ -377,7 +401,13 @@ async def dense_search(
         with_payload=True,
     )
     t_search = time.time() - t_search_start
-    logger.info(f"    ↳ Dense vector search: {t_search:.3f}s")
+
+    logger.debug_event(
+        "dense_search",
+        "Dense vector search completed",
+        duration_ms=t_search * 1000,
+        data={"results_count": len(results.points)}
+    )
 
     dense_results = [
         {
@@ -394,9 +424,6 @@ async def dense_search(
         }
         for i, hit in enumerate(results.points)
     ]
-
-    # 디버깅: 처음 3개의 doc_id 로깅
-    logger.info(f"[DENSE] Top 3 doc_ids: {[r['doc_id'] for r in dense_results[:3]]}")
 
     return dense_results
 
@@ -416,17 +443,13 @@ async def sparse_search(
 
     try:
         # 1. Sparse 임베딩 생성
-        t_embed_start = time.time()
         sparse_vectors = sparse_model.embed_query(query)
-        t_embed = time.time() - t_embed_start
-        logger.info(f"    ↳ Sparse embedding: {t_embed:.3f}s")
 
         # indices와 values가 이미 리스트인 경우를 처리
         indices = sparse_vectors.indices if isinstance(sparse_vectors.indices, list) else sparse_vectors.indices.tolist()
         values = sparse_vectors.values if isinstance(sparse_vectors.values, list) else sparse_vectors.values.tolist()
 
         # 2. 벡터 검색
-        t_search_start = time.time()
         results = client.query_points(
             collection_name=collection_name,
             query=SparseVector(
@@ -437,8 +460,6 @@ async def sparse_search(
             limit=top_k,
             with_payload=True,
         )
-        t_search = time.time() - t_search_start
-        logger.info(f"    ↳ Sparse vector search: {t_search:.3f}s")
 
         sparse_results = [
             {
@@ -456,9 +477,6 @@ async def sparse_search(
             for i, hit in enumerate(results.points)
         ]
 
-        # 디버깅: 처음 3개의 doc_id 로깅
-        logger.info(f"[SPARSE] Top 3 doc_ids: {[r['doc_id'] for r in sparse_results[:3]]}")
-
         return sparse_results
 
     except Exception as e:
@@ -475,15 +493,11 @@ async def hybrid_search(
     # Dense와 Sparse 검색을 병렬로 실행
     dense_task = dense_search(collection_name, query, top_k)
     sparse_task = sparse_search(collection_name, query, top_k)
-    
+
     dense_results, sparse_results = await asyncio.gather(dense_task, sparse_task)
-    
-    logger.info(f"Dense search: {len(dense_results)} results")
-    logger.info(f"Sparse search: {len(sparse_results)} results")
-    
+
     if sparse_results:
         fused = rrf_fusion(dense_results, sparse_results)
-        logger.info(f"RRF fusion: {len(fused)} results")
         return fused
-    
+
     return dense_results

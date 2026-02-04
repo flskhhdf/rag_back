@@ -1,21 +1,22 @@
-import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from app.routers import pdf, chat, notebook, user, tasks, feedback
+from app.core.logging_config import setup_logging
+from app.middleware.request_id import RequestIDMiddleware
 
 load_dotenv()
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Initialize structured logging
+setup_logging()
 
 app = FastAPI(title="RAG Chatbot API", version="1.0.0")
 
+# Add Request ID middleware (BEFORE other middlewares)
+app.add_middleware(RequestIDMiddleware)
+
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],

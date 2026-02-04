@@ -2,14 +2,14 @@
 """
 LLM Client Module - vLLM OpenAI-compatible API
 """
-import logging
 import re
-from typing import List, Dict, AsyncGenerator, Tuple, Any   
+from typing import List, Dict, AsyncGenerator, Tuple, Any
 import httpx
 
 from .config import RAGConfig, SYS_PROMPT, SYS_PROMPT_NO_CTX, CTX_TEMPLATE
+from app.core.structured_logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def clean_stream_chunk(text: str) -> str:
