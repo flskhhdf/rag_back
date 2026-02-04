@@ -4,7 +4,6 @@ RAG Pipeline - 메인 파이프라인 클래스
 """
 import re
 import os
-import logging
 import time
 from datetime import datetime
 from typing import List, Dict, Any, AsyncGenerator
@@ -13,13 +12,10 @@ from .config import RAGConfig
 from .retriever import hybrid_search, rerank_results, get_qdrant_client
 from .context_expansion import expand_context_with_neighbors
 from .llm_client import build_rag_messages, stream_llm_response
+from app.core.structured_logger import get_logger
 
-# 로거 설정
-logger = logging.getLogger(__name__)
-
-# 로그 파일 설정
-log_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'logs')
-os.makedirs(log_dir, exist_ok=True)
+# 구조화된 로거
+logger = get_logger(__name__)
 
 
 def _sanitize_collection_name(filename: str) -> str:
@@ -47,7 +43,11 @@ class RAGPipeline:
 
     def __init__(self):
         self.config = RAGConfig()
-        logger.info(f"[RAGPipeline] Initialized with model: {self.config.LLM_MODEL}")
+        logger.info_event(
+            "pipeline_initialized",
+            "RAG Pipeline initialized",
+            data={"llm_model": self.config.LLM_MODEL}
+        )
 
 
 
@@ -73,10 +73,17 @@ class RAGPipeline:
         try:
             # pdf_id를 컬렉션 이름으로 사용 (한글 파일명 충돌 방지)
             collection_name = pdf_id
-            
-            logger.info("="*80)
-            logger.info(f"[NEW QUERY] PDF: {filename}, Query: {query}")
-            logger.info("-"*80)
+
+            logger.info_event(
+                "request_received",
+                "New RAG request received",
+                data={
+                    "pdf_id": pdf_id,
+                    "filename": filename,
+                    "query": query[:200],  # Truncate long queries
+                    "has_history": bool(chat_history)
+                }
+            )
 
             # 1. 대화 히스토리 포맷팅 (최근 6턴 = 12개 메시지)
             prior_dialog = ""
@@ -91,22 +98,40 @@ class RAGPipeline:
             t_search_start = time.time()
             search_results = await hybrid_search(collection_name, query)
             t_search = time.time() - t_search_start
-            logger.info(f"⏱️  [1] Hybrid Search (Embedding + Retrieval): {t_search:.3f}s")
+
+            logger.info_event(
+                "search_completed",
+                "Hybrid search completed",
+                duration_ms=t_search * 1000,
+                data={"results_count": len(search_results)}
+            )
 
             if not search_results:
-                logger.warning("No search results found")
+                logger.warning_event(
+                    "search_no_results",
+                    "No search results found"
+                )
                 yield "검색된 문서가 없습니다. 다른 질문을 시도해보세요."
                 return
 
-            # 디버깅: RRF 융합 직후 결과 미리보기
-            logger.info(f"[DEBUG] RRF Fusion results (top 10):")
+            # 디버깅: RRF 융합 직후 결과 미리보기 (DEBUG 레벨)
             for i, result in enumerate(search_results[:10], 1):
-                text_preview = result.get("text", "")[:150].replace("\n", " ")
+                text_preview = result.get("text", "")[:100].replace("\n", " ")
                 rrf_score = result.get("rrf_score", 0)
                 payload = result.get("payload", {})
                 metadata = payload.get("metadata", {})
                 page_no = metadata.get("page_no", "N/A")
-                logger.info(f"  [{i}] RRF={rrf_score:.4f} | Page={page_no} | Text: {text_preview}...")
+
+                logger.debug_event(
+                    "rrf_result",
+                    f"RRF result {i}",
+                    data={
+                        "rank": i,
+                        "rrf_score": rrf_score,
+                        "page_no": page_no,
+                        "text_preview": text_preview
+                    }
+                )
 
             # 3. 리랭킹
             t_rerank_start = time.time()
@@ -116,26 +141,51 @@ class RAGPipeline:
                 top_n=self.config.TOP_K_FINAL * 2
             )
             t_rerank = time.time() - t_rerank_start
-            logger.info(f"⏱️  [2] Reranking: {t_rerank:.3f}s")
-            logger.info(f"After reranking: {len(reranked_results)} results")
 
-            # 디버깅: 리랭킹 후 결과 미리보기
-            logger.info(f"[DEBUG] After reranking (top 10):")
+            # Extract scores for metrics
+            rerank_scores = [r.get("rerank_score", 0) for r in reranked_results]
+            max_score = max(rerank_scores) if rerank_scores else 0
+
+            logger.info_event(
+                "rerank_completed",
+                "Reranking completed",
+                duration_ms=t_rerank * 1000,
+                data={
+                    "results_count": len(reranked_results),
+                    "max_score": max_score,
+                    "top_scores": rerank_scores[:5]
+                }
+            )
+
+            # 디버깅: 리랭킹 후 결과 미리보기 (DEBUG 레벨)
             for i, result in enumerate(reranked_results[:10], 1):
-                text_preview = result.get("text", "")[:150].replace("\n", " ")
+                text_preview = result.get("text", "")[:100].replace("\n", " ")
                 rerank_score = result.get("rerank_score", 0)
                 payload = result.get("payload", {})
                 metadata = payload.get("metadata", {})
                 page_no = metadata.get("page_no", "N/A")
-                logger.info(f"  [{i}] Rerank={rerank_score:.4f} | Page={page_no} | Text: {text_preview}...")
+
+                logger.debug_event(
+                    "rerank_result",
+                    f"Rerank result {i}",
+                    data={
+                        "rank": i,
+                        "rerank_score": rerank_score,
+                        "page_no": page_no,
+                        "text_preview": text_preview
+                    }
+                )
 
             # 4. 검색 결과 신뢰도 체크
-            max_score = max([r.get("rerank_score") or r.get("rrf_score") or r.get("score", 0) for r in reranked_results])
-            logger.info(f"[SCORE CHECK] Max rerank score: {max_score:.4f}, Threshold: {self.config.MIN_SEARCH_SCORE}")
-            
             if max_score < self.config.MIN_SEARCH_SCORE:
-                logger.warning(f"⚠️  Search scores too low (max={max_score:.4f} < {self.config.MIN_SEARCH_SCORE})")
-                logger.warning("⚠️  Using conversation context only (no document context)")
+                logger.warning_event(
+                    "score_threshold_not_met",
+                    "Search scores too low, using conversation context only",
+                    data={
+                        "max_score": max_score,
+                        "threshold": self.config.MIN_SEARCH_SCORE
+                    }
+                )
                 
                 # 검색 결과 무시, 대화 히스토리만 사용
                 messages = build_rag_messages(
@@ -148,7 +198,19 @@ class RAGPipeline:
                 async for chunk in stream_llm_response(messages):
                     yield chunk
                 t_llm = time.time() - t_llm_start
-                logger.info(f"⏱️  [LLM] Response (conversation-only): {t_llm:.3f}s")
+
+                logger.info_event(
+                    "llm_response",
+                    "LLM response completed (conversation-only)",
+                    duration_ms=t_llm * 1000
+                )
+
+                logger.log_metrics({
+                    "total_duration_ms": (t_search + t_rerank + t_llm) * 1000,
+                    "search_duration_ms": t_search * 1000,
+                    "rerank_duration_ms": t_rerank * 1000,
+                    "llm_duration_ms": t_llm * 1000
+                })
                 return
             
             # 5. 이웃 청크 확장
@@ -169,13 +231,20 @@ class RAGPipeline:
                     contexts.append(text)
 
             # 로그
-            logger.info(f"[RETRIEVED] {len(expanded_results)} chunks")
-            for i, r in enumerate(expanded_results, 1):
-                score = r.get("rerank_score") or r.get("rrf_score") or r.get("score", 0)
-                logger.info(f"  Chunk {i}: rerank_score={score:.6f}")
-            logger.info("="*80)
+            logger.info_event(
+                "context_retrieved",
+                f"Retrieved {len(expanded_results)} chunks",
+                data={
+                    "chunks_count": len(expanded_results),
+                    "scores": [
+                        r.get("rerank_score") or r.get("rrf_score") or r.get("score", 0)
+                        for r in expanded_results
+                    ]
+                }
+            )
 
             if not contexts:
+                logger.warning_event("no_contexts", "No contexts available after retrieval")
                 yield "검색된 문서가 없습니다. 다른 질문을 시도해보세요."
                 return
 
@@ -190,13 +259,32 @@ class RAGPipeline:
             async for chunk in stream_llm_response(messages):
                 yield chunk
             t_llm = time.time() - t_llm_start
-            logger.info(f"⏱️  [3] LLM Response Generation: {t_llm:.3f}s")
 
-            # 전체 소요 시간
-            t_total = t_search + t_rerank + t_llm
-            logger.info(f"⏱️  [TOTAL] RAG Pipeline: {t_total:.3f}s")
+            logger.info_event(
+                "llm_response",
+                "LLM response completed",
+                duration_ms=t_llm * 1000
+            )
+
+            # 전체 성능 메트릭
+            logger.log_metrics({
+                "total_duration_ms": (t_search + t_rerank + t_llm) * 1000,
+                "search_duration_ms": t_search * 1000,
+                "rerank_duration_ms": t_rerank * 1000,
+                "llm_duration_ms": t_llm * 1000
+            })
+
+            logger.info_event(
+                "pipeline_completed",
+                "RAG pipeline completed successfully",
+                duration_ms=(t_search + t_rerank + t_llm) * 1000
+            )
 
         except Exception as e:
             import traceback
-            logger.error(f"Pipeline error: {e}\n{traceback.format_exc()}")
+            logger.error_event(
+                "pipeline_error",
+                f"Pipeline error: {str(e)}",
+                data={"traceback": traceback.format_exc()}
+            )
             yield f"오류가 발생했습니다: {str(e)}"
