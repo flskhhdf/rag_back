@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from app.routers import pdf, chat, notebook, user, tasks, feedback
+from app.routers import pdf, chat, notebook, user, tasks, feedback, log_viewer
 from app.core.logging_config import setup_logging
 from app.middleware.request_id import RequestIDMiddleware
 from app.services.rag.sleep_manager import initialize_sleep_manager
@@ -46,6 +46,7 @@ app.include_router(notebook.router, prefix="/api/v1/notebook", tags=["Notebook"]
 app.include_router(user.router, prefix="/api/v1/user", tags=["User"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(feedback.router, prefix="/api/v1/feedback", tags=["Feedback"])
+app.include_router(log_viewer.router)  # Log viewer at root level
 
 
 @app.on_event("startup")
