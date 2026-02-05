@@ -1032,6 +1032,7 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                     table_idx = ref.split('/')[-1]
                     captions = asset.get("captions", [])
                     description = asset.get("description", "")
+                    markdown_table = asset.get("markdown_table", "")
                     
                     # content용: Caption 우선, 없으면 Description
                     content_text = ""
@@ -1040,13 +1041,15 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                     elif self.include_descriptions and description:
                         content_text = f"[TABLE:table-{table_idx}] {description}"
                     
-                    # content_for_llm용: Caption + Description 모두 포함
+                    # content_for_llm용: Caption + Markdown Table + Description 모두 포함
                     llm_text_parts = []
                     if captions:
                         llm_text_parts.append(f"[TABLE:table-{table_idx}] {captions[0]['text']}")
+                    if markdown_table:
+                        llm_text_parts.append(f"```markdown\n{markdown_table}\n```")
                     if self.include_descriptions and description:
                         llm_text_parts.append(f"[TABLE Description: {description}]")
-                    llm_text = "\n".join(llm_text_parts) if llm_text_parts else ""
+                    llm_text = "\n\n".join(llm_text_parts) if llm_text_parts else ""
                     
                     pending_assets.append((ref, page_no, content_text, llm_text))
                 continue
