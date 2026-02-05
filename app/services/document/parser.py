@@ -40,11 +40,12 @@ from PIL import Image
 import nltk
 from nltk.tokenize import sent_tokenize
 
-# Config import (CUDA 설정 전에 먼저 import)
+# Config import
 from app.services.rag.config import RAGConfig
 
-# CUDA 디바이스 설정 (VLM/LLM용)
-os.environ['CUDA_VISIBLE_DEVICES'] = RAGConfig.DOCLING_CUDA_DEVICE
+# Note: CUDA_VISIBLE_DEVICES 설정 제거
+# VLM/LLM은 vLLM API를 통해 호출되므로 로컬 GPU 설정 불필요
+# 전역 CUDA_VISIBLE_DEVICES 설정은 다른 모듈(retriever 등)의 GPU 접근을 방해함
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -248,7 +249,10 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         # LLM/VLM 설정 (config 기본값 사용)
         self.llm_model = llm_model if llm_model is not None else RAGConfig.DOCLING_LLM_MODEL
         self.vision_model = vision_model if vision_model is not None else RAGConfig.DOCLING_VISION_MODEL
-        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.VLLM_URL
+        # VLM URL (이미지 description용, Port 8002)
+        self.vlm_url = ollama_url if ollama_url is not None else RAGConfig.VLM_URL
+        # LLM URL (테이블 description용, Port 8003)
+        self.llm_url = RAGConfig.FOLLOW_UP_LLM_URL
 
         # 프롬프트
         self.image_description_prompt = image_description_prompt
@@ -264,6 +268,14 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.progress_callback = progress_callback
 
         self.logger = logging.getLogger(__name__)
+
+        # 고급 모드 설정 로깅
+        self.logger.info(
+            f"DoclingChunker 설정 완료: advanced_mode={self.advanced_mode}, "
+            f"enable_image_description={self.enable_image_description}, "
+            f"enable_table_description={self.enable_table_description}, "
+            f"vlm_url={self.vlm_url}, llm_url={self.llm_url}"
+        )
 
         # OCR 결과 저장용
         self.last_ocr_result = None
@@ -284,14 +296,15 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
     # ===== Docling Complete 메서드 =====
 
     def _generate_vlm_description(self, image: Image.Image) -> Optional[str]:
-        """vLLM VLM을 사용하여 이미지 description 생성"""
+        """vLLM VLM을 사용하여 이미지 description 생성 (Port 8002: Qwen VLM)"""
         try:
+            self.logger.info(f"VLM description 생성 시작: url={self.vlm_url}, model={self.vision_model}")
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
             img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
             response = requests.post(
-                f"{self.ollama_url}/v1/chat/completions",
+                f"{self.vlm_url}/v1/chat/completions",
                 json={
                     "model": self.vision_model,
                     "messages": [
@@ -340,10 +353,11 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             return None
 
     def _call_vllm_text(self, prompt: str) -> Optional[str]:
-        """vLLM 텍스트 모델 호출"""
+        """vLLM 텍스트 모델 호출 (Port 8003: GPT-OSS-20B)"""
         try:
+            self.logger.info(f"LLM text 생성 시작: url={self.llm_url}, model={self.llm_model}")
             response = requests.post(
-                f"{self.ollama_url}/v1/chat/completions",
+                f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model,
                     "messages": [
@@ -986,13 +1000,18 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         section_chunk_indices: dict[str, int] = {}
 
         # pending_assets: 다음 텍스트 앞에 삽입될 에셋들
-        pending_assets: list[tuple[str, int, str]] = []  # (ref, page_no, asset_text)
+        # (ref, page_no, content_text, llm_text): content용 텍스트와 LLM용 텍스트 분리
+        pending_assets: list[tuple[str, int, str, str]] = []
 
-        # body children 순회
+        # body children 순회 (groups를 재귀적으로 처리하기 위해 deque 사용)
+        from collections import deque
+
         body = data.get('body', {})
         children = body.get('children', [])
+        children_queue = deque(children)
 
-        for child_ref in children:
+        while children_queue:
+            child_ref = children_queue.popleft()
             ref = child_ref.get('$ref', '')
             item = self._get_item_by_ref(ref, data)
 
@@ -1010,41 +1029,52 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             if ref.startswith('#/tables/'):
                 if ref in all_assets:
                     asset = all_assets[ref]
-                    asset_text_parts = []
-
-                    if self.include_descriptions and asset.get("description"):
-                        asset_text_parts.append(f"[TABLE:table-{ref.split('/')[-1]}] {asset['description']}")
-
-                    for cap in asset.get("captions", []):
-                        asset_text_parts.append(f"[TABLE Caption: {cap['text']}]")
-
-                    if asset_text_parts:
-                        asset_text = "\n".join(asset_text_parts)
-                        pending_assets.append((ref, page_no, asset_text))
-                    else:
-                        # 텍스트 없어도 ref는 추가
-                        pending_assets.append((ref, page_no, ""))
+                    table_idx = ref.split('/')[-1]
+                    captions = asset.get("captions", [])
+                    description = asset.get("description", "")
+                    
+                    # content용: Caption 우선, 없으면 Description
+                    content_text = ""
+                    if captions:
+                        content_text = f"[TABLE:table-{table_idx}] {captions[0]['text']}"
+                    elif self.include_descriptions and description:
+                        content_text = f"[TABLE:table-{table_idx}] {description}"
+                    
+                    # content_for_llm용: Caption + Description 모두 포함
+                    llm_text_parts = []
+                    if captions:
+                        llm_text_parts.append(f"[TABLE:table-{table_idx}] {captions[0]['text']}")
+                    if self.include_descriptions and description:
+                        llm_text_parts.append(f"[TABLE Description: {description}]")
+                    llm_text = "\n".join(llm_text_parts) if llm_text_parts else ""
+                    
+                    pending_assets.append((ref, page_no, content_text, llm_text))
                 continue
 
             # 이미지 처리
             if ref.startswith('#/pictures/'):
                 if ref in all_assets:
                     asset = all_assets[ref]
-                    asset_text_parts = []
-
-                    # Description 추가
-                    if self.include_descriptions and asset.get("description"):
-                        asset_text_parts.append(f"[IMAGE:image-{ref.split('/')[-1]}] {asset['description']}")
-
-                    # Caption 추가
-                    for cap in asset.get("captions", []):
-                        asset_text_parts.append(f"[IMAGE Caption: {cap['text']}]")
-
-                    if asset_text_parts:
-                        asset_text = "\n".join(asset_text_parts)
-                        pending_assets.append((ref, page_no, asset_text))
-                    else:
-                        pending_assets.append((ref, page_no, ""))
+                    image_idx = ref.split('/')[-1]
+                    captions = asset.get("captions", [])
+                    description = asset.get("description", "")
+                    
+                    # content용: Caption 우선, 없으면 Description
+                    content_text = ""
+                    if captions:
+                        content_text = f"[IMAGE:image-{image_idx}] {captions[0]['text']}"
+                    elif self.include_descriptions and description:
+                        content_text = f"[IMAGE:image-{image_idx}] {description}"
+                    
+                    # content_for_llm용: Caption + Description 모두 포함
+                    llm_text_parts = []
+                    if captions:
+                        llm_text_parts.append(f"[IMAGE:image-{image_idx}] {captions[0]['text']}")
+                    if self.include_descriptions and description:
+                        llm_text_parts.append(f"[IMAGE Description: {description}]")
+                    llm_text = "\n".join(llm_text_parts) if llm_text_parts else ""
+                    
+                    pending_assets.append((ref, page_no, content_text, llm_text))
                 continue
 
             # Formula 처리
@@ -1053,25 +1083,44 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                     asset = all_assets[ref]
                     formula_text = asset.get("formula", "")
                     if formula_text:
-                        asset_text = f"[FORMULA:formula-{ref.split('/')[-1]}] {formula_text}"
-                        pending_assets.append((ref, page_no, asset_text))
+                        formula_idx = ref.split('/')[-1]
+                        asset_text = f"[FORMULA:formula-{formula_idx}] {formula_text}"
+                        # Formula는 content와 content_for_llm 동일
+                        pending_assets.append((ref, page_no, asset_text, asset_text))
                     else:
-                        pending_assets.append((ref, page_no, ""))
+                        pending_assets.append((ref, page_no, "", ""))
+                continue
+
+            # Groups 처리 (list 등)
+            # groups의 children을 재귀적으로 처리 (순서 유지하며 큐 앞에 삽입)
+            if ref.startswith('#/groups/'):
+                group_children = item.get('children', [])
+                # 순서를 유지하며 큐 앞에 삽입 (현재 위치 바로 다음에 처리)
+                children_queue.extendleft(reversed(group_children))
                 continue
 
             # 텍스트 노드 처리
-            text = item.get('text', '').strip()
+            # text: 정규화된 텍스트 (Docling이 처리, 줄바꿈 제거됨)
+            # orig: 원본 텍스트 (줄바꿈 포함)
+            text = item.get('text', '').strip()  # content용: 정돈된 텍스트
+            text_raw_orig = item.get('orig', item.get('text', ''))  # 원본 텍스트 (fallback to text)
+            text_for_llm = text_raw_orig.lstrip() if text_raw_orig else text  # content_for_llm용: 원본 줄바꿈 보존
+
             if not text:
                 continue
 
             # pending_assets를 현재 텍스트 앞에 추가
-            for asset_ref, asset_page, asset_text in pending_assets:
+            for asset_ref, asset_page, content_text, llm_text in pending_assets:
                 current_chunk["asset_refs"].add(asset_ref)
                 current_chunk["pages"].add(asset_page)
 
-                if asset_text:
-                    # content_with_asset에만 추가
-                    current_chunk['content_with_asset'] += asset_text + "\n\n"
+                # content에는 간결한 텍스트만 (caption 우선)
+                if content_text:
+                    current_chunk['content'] += content_text + "\n\n"
+                
+                # content_with_asset (LLM용)에는 상세 텍스트 (caption + description)
+                if llm_text:
+                    current_chunk['content_with_asset'] += llm_text + "\n\n"
 
             # pending_assets 초기화
             pending_assets = []
@@ -1134,8 +1183,8 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
 
                             temp_chunk = {
                                 "section_header": current_chunk['section_header'],
-                                "content": sentence,
-                                "content_with_asset": sentence,
+                                "content": sentence,  # content: 정돈된 형식
+                                "content_with_asset": sentence,  # 문장 분할은 이미 정돈된 텍스트 사용
                                 "content_token_count": sentence_tokens,
                                 "pages": {page_no},
                                 "asset_refs": set(),
@@ -1155,7 +1204,9 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                                 "asset_refs": set(),
                             }
 
+                        # content: 정돈된 형식 (공백으로 연결)
                         current_chunk['content'] += sentence + " "
+                        # content_with_asset: 원본 형식 보존
                         current_chunk['content_with_asset'] += sentence + " "
                         current_chunk['content_token_count'] += sentence_tokens
                         current_chunk["pages"].add(page_no)
@@ -1165,8 +1216,8 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
                     self._save_text_chunk(chunks, current_chunk, section_chunk_indices)
                     current_chunk = {
                         "section_header": current_chunk['section_header'],
-                        "content": text + " ",
-                        "content_with_asset": text + " ",
+                        "content": text + " ",  # content: 정돈된 형식
+                        "content_with_asset": text_for_llm if text_for_llm.endswith('\n') else text_for_llm + " ",  # LLM용: 원본 줄바꿈 보존
                         "content_token_count": estimated_tokens,
                         "pages": {page_no},
                         "asset_refs": set(),
@@ -1174,18 +1225,23 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
 
                 # 현재 청크에 텍스트 추가
                 else:
+                    # content: 정돈된 형식 (공백으로 연결)
                     current_chunk['content'] += text + " "
-                    current_chunk['content_with_asset'] += text + " "
+                    # content_with_asset: 원본 형식 보존 (줄바꿈이 있으면 유지, 없으면 공백)
+                    current_chunk['content_with_asset'] += text_for_llm if text_for_llm.endswith('\n') else text_for_llm + " "
                     current_chunk['content_token_count'] += estimated_tokens
                     current_chunk["pages"].add(page_no)
 
         # 남은 pending_assets 처리
-        for asset_ref, asset_page, asset_text in pending_assets:
+        for asset_ref, asset_page, content_text, llm_text in pending_assets:
             current_chunk["asset_refs"].add(asset_ref)
             current_chunk["pages"].add(asset_page)
 
-            if asset_text:
-                current_chunk['content_with_asset'] += asset_text + "\n\n"
+            if content_text:
+                current_chunk['content'] += content_text + "\n\n"
+            
+            if llm_text:
+                current_chunk['content_with_asset'] += llm_text + "\n\n"
 
         # 마지막 청크 저장
         if current_chunk['content'].strip():
@@ -1361,6 +1417,20 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.logger.info("Step 2: Dual Content 생성 중...")
         self._create_dual_content(chunks, all_assets)
         self.logger.info(f"  Dual Content 생성 완료")
+
+        # Step 3: section_header를 content와 content_for_llm에 추가 (검색 최적화)
+        self.logger.info("Step 3: section_header를 content와 content_for_llm에 추가 중...")
+        for chunk in chunks:
+            section_header = chunk.get('section_header', '').strip()
+            if section_header:
+                # content에 section_header 추가 (토큰 계산은 이미 완료된 상태)
+                original_content = chunk.get('content', '')
+                chunk['content'] = f"Section: {section_header}\n\n{original_content}"
+
+                # content_for_llm에도 section_header 추가
+                original_content_for_llm = chunk.get('content_for_llm', '')
+                chunk['content_for_llm'] = f"Section: {section_header}\n\n{original_content_for_llm}"
+        self.logger.info(f"  section_header 추가 완료")
 
         self.logger.info(f"✅ Dual Content 청킹 완료: {len(chunks)}개 청크 생성")
         return chunks, source_filename
@@ -1575,6 +1645,8 @@ class IntegratedParserConfig:
     # 고급 모드: VLM/LLM description 생성
     enable_image_description: bool = False
     enable_table_description: bool = False
+    # 임베딩 최적화: content에 asset 설명 appendix 추가
+    embed_with_assets: bool = False
 
 
 def process_pdf_to_chunks(
@@ -1621,10 +1693,19 @@ def process_pdf_to_chunks(
 
     # DoclingChunker 인스턴스 생성 (모든 옵션은 내부 기본값 사용)
     # 고급 모드만 사용자가 선택 가능
+    advanced_mode_enabled = config.enable_image_description or config.enable_table_description
+    logging.getLogger(__name__).info(
+        f"DoclingChunker 초기화: advanced_mode={advanced_mode_enabled}, "
+        f"enable_image_description={config.enable_image_description}, "
+        f"enable_table_description={config.enable_table_description}, "
+        f"embed_with_assets={config.embed_with_assets}"
+    )
+
     chunker = DoclingChunker(
-        advanced_mode=(config.enable_image_description or config.enable_table_description),
+        advanced_mode=advanced_mode_enabled,
         enable_image_description=config.enable_image_description,
         enable_table_description=config.enable_table_description,
+        embed_with_assets=config.embed_with_assets,
         progress_callback=progress_callback,
     )
 

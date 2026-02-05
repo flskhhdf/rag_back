@@ -9,11 +9,12 @@ class RAGConfig:
     """RAG 파이프라인 설정"""
     
     # Embedding
+    # Port 8006: /model_weight (Qwen3-Embedding-8B, vLLM)
     EMBED_TYPE = os.getenv("EMBED_TYPE", "vllm")  # "vllm", "ollama", or "huggingface"
-    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "/model_weight")
     SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
-    OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # For ollama embeddings
-    VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8004")  # For vLLM embeddings
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")  # For ollama embeddings
+    VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8006")  # For vLLM embeddings
     
     
     # Search
@@ -21,15 +22,25 @@ class RAGConfig:
     TOP_K_FINAL = int(os.getenv("TOP_K_FINAL", "5"))
     
     # Reranking
-    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "jina", "qwen", or "crossencoder"
-    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
-    JINA_RERANKER_MODEL = os.getenv("JINA_RERANKER_MODEL", "jinaai/jina-reranker-v3")  # For Jina Reranker
+    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "vllm", "qwen", or "crossencoder"
+
+    # vLLM Reranker (Port 8005: Qwen3-Reranker-8B)
+    VLLM_RERANKER_URL = os.getenv("VLLM_RERANKER_URL", "http://localhost:8005")
+    VLLM_RERANKER_MODEL = os.getenv("VLLM_RERANKER_MODEL", "/model_weight")
+
+    # Local GPU Reranker
     QWEN_RERANKER_MODEL = os.getenv("QWEN_RERANKER_MODEL", "Qwen/Qwen3-Reranker-8B")  # For Qwen Reranker
+    RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "cuda:1")  # GPU device for Reranker
+
+    # CrossEncoder Reranker
+    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
+    CROSSENCODER_MODEL = os.getenv("CROSSENCODER_MODEL", "BAAI/bge-reranker-v2-m3")
+
     RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # 필터링 임계값 (낮은 점수 제거)
-    
+
     # Minimum Search Score (검색 결과 신뢰도 임계값)
     # 최고 점수가 이 값보다 낮으면 검색 결과를 무시하고 대화 히스토리만 사용
-    # Jina Reranker v3 점수 범위: -1 ~ 1 (logits)
+    # Qwen Reranker 점수 범위: 0 ~ 1 (probability)
     # 권장: 0.15 (0.15 미만은 거의 무관한 질문 또는 후속 질문)
     MIN_SEARCH_SCORE = float(os.getenv("MIN_SEARCH_SCORE", "0.15"))
     
@@ -43,12 +54,14 @@ class RAGConfig:
     NEIGHBOR_EXPAND = int(os.getenv("NEIGHBOR_EXPAND", "1"))
     
     # LLM (vLLM OpenAI-compatible API)
-    VLLM_URL = os.getenv("VLLM_HOST", "http://localhost:8001")
-    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:120b")
+    # Port 8001: openai/gpt-oss-120b (최종 사용자 응답)
+    VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8001")
+    LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
     MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
     SUMMARIZE_LANG = os.getenv("SUMMARIZE_LANG", "ko")
 
     # Follow-up Questions
+    # Port 8003: openai/gpt-oss-20b (테이블 description + follow-up question)
     ENABLE_FOLLOW_UP_QUESTIONS = os.getenv("ENABLE_FOLLOW_UP_QUESTIONS", "true").lower() in ("true", "1", "yes")
     FOLLOW_UP_QUESTIONS_COUNT = int(os.getenv("FOLLOW_UP_QUESTIONS_COUNT", "3"))
     FOLLOW_UP_LLM_URL = os.getenv("FOLLOW_UP_LLM_URL", "http://localhost:8003")
@@ -61,14 +74,18 @@ class RAGConfig:
     # Document Parsing (Docling)
     DOCLING_IMAGE_SCALE = float(os.getenv("DOCLING_IMAGE_SCALE", "2.0"))
     DOCLING_OCR_THRESHOLD = float(os.getenv("DOCLING_OCR_THRESHOLD", "0.4"))
-    DOCLING_VISION_MODEL = os.getenv("DOCLING_VISION_MODEL", "qwen3-vl:latest")
-    DOCLING_LLM_MODEL = os.getenv("DOCLING_LLM_MODEL", "gpt-oss:20b")
-    DOCLING_CUDA_DEVICE = os.getenv("DOCLING_CUDA_DEVICE", "1")  # CUDA device for Docling (VLM/LLM)
+    DOCLING_VISION_MODEL = os.getenv("DOCLING_VISION_MODEL", "Qwen/Qwen3-VL-8B-Instruct-FP8")
+    DOCLING_LLM_MODEL = os.getenv("DOCLING_LLM_MODEL", "openai/gpt-oss-20b")
+    # Note: DOCLING_CUDA_DEVICE 제거 (VLM/LLM은 vLLM API 사용, 로컬 GPU 불필요)
+
+    # Port 8002: Qwen/Qwen3-VL-8B-Instruct-FP8 (이미지 description)
+    VLM_URL = os.getenv("VLM_URL", "http://localhost:8002")
 
     # Chunking
     CHUNK_MAX_TOKENS = int(os.getenv("CHUNK_MAX_TOKENS", "400"))
     CHUNK_MIN_TOKENS = int(os.getenv("CHUNK_MIN_TOKENS", "100"))
     CHUNK_OVERLAP_SENTENCES = int(os.getenv("CHUNK_OVERLAP_SENTENCES", "2"))
+    EMBED_WITH_ASSETS = os.getenv("EMBED_WITH_ASSETS", "false").lower() in ("true", "1", "yes")  # content에 asset 설명 appendix 추가
 
 
 # =============================================================================
