@@ -12,7 +12,7 @@ from qdrant_client.http.models import SparseVector
 from sentence_transformers import CrossEncoder
 
 try:
-    from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
     _HAS_TRANSFORMERS = True
 except ImportError:
@@ -26,56 +26,6 @@ logger = get_logger(__name__)
 
 # Reranker 싱글톤
 _reranker = None
-
-
-class JinaReranker:
-    """
-    Jina Reranker v3 공식 API
-    
-    Hugging Face: https://huggingface.co/jinaai/jina-reranker-v3
-    """
-    
-    def __init__(self, model_name: str = "jinaai/jina-reranker-v3", device: str = "cuda"):
-        if not _HAS_TRANSFORMERS:
-            raise ImportError("transformers와 torch가 필요합니다: pip install transformers torch")
-        
-        self.device = device if torch.cuda.is_available() else "cpu"
-        self.model_name = model_name
-        
-        logger.info(f"[Jina Reranker] 모델 로딩: {model_name} (device: {self.device})")
-        
-        # Jina 공식 API: AutoModel 사용
-        self.model = AutoModel.from_pretrained(
-            model_name,
-            dtype="auto",
-            trust_remote_code=True,
-        )
-        self.model.to(self.device)
-        self.model.eval()
-        
-        logger.info(f"[Jina Reranker] 로딩 완료")
-    
-    def predict(self, pairs: List[tuple]) -> List[float]:
-        """
-        CrossEncoder 호환 인터페이스
-        
-        Args:
-            pairs: [(query, document), ...] 형식의 리스트
-            
-        Returns:
-            각 pair에 대한 relevance score (0~1 범위)
-        """
-        if not pairs:
-            return []
-        
-        query = pairs[0][0]  # 모든 pair는 같은 query를 가짐
-        documents = [doc for _, doc in pairs]
-        
-        # Jina 공식 API 호출
-        results = self.model.rerank(query, documents)
-        
-        # relevance_score 추출 (float32 -> float 변환)
-        return [float(result['relevance_score']) for result in results]
 
 
 class QwenReranker:
@@ -103,7 +53,7 @@ class QwenReranker:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16
-            ).cuda().eval()
+            ).to(self.device).eval()
         else:
             self.model = AutoModelForCausalLM.from_pretrained(model_name).eval()
 
@@ -209,20 +159,16 @@ def get_reranker():
         logger.info("[RERANKER] 싱글톤이 None, 새로 로딩합니다")
         reranker_type = RAGConfig.RERANKER_TYPE.lower()
 
-        if reranker_type == "jina":
-            if not _HAS_TRANSFORMERS:
-                logger.warning("Jina Reranker를 사용할 수 없습니다. CrossEncoder로 폴백합니다.")
-                _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
-                logger.info(f"Reranker loaded (fallback): {RAGConfig.RERANKER_ID}")
-            else:
-                _reranker = JinaReranker(model_name=RAGConfig.JINA_RERANKER_MODEL)
-        elif reranker_type == "qwen":
+        if reranker_type == "qwen":
             if not _HAS_TRANSFORMERS:
                 logger.warning("Qwen Reranker를 사용할 수 없습니다. CrossEncoder로 폴백합니다.")
                 _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
                 logger.info(f"Reranker loaded (fallback): {RAGConfig.RERANKER_ID}")
             else:
-                _reranker = QwenReranker(model_name=RAGConfig.QWEN_RERANKER_MODEL)
+                _reranker = QwenReranker(
+                    model_name=RAGConfig.QWEN_RERANKER_MODEL,
+                    device=RAGConfig.RERANKER_DEVICE
+                )
         else:
             _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
             logger.info(f"Reranker loaded: {RAGConfig.RERANKER_ID}")
@@ -358,17 +304,46 @@ def rerank_results(
     reranked = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
     filtered = [r for r in reranked if r.get("rerank_score", 0) >= RAGConfig.RERANK_THRESHOLD]
 
+    # Rerank 결과 개별 로깅 (상위 결과들)
+    top_results = filtered[:top_n] if filtered else reranked[:top_n]
+    for i, result in enumerate(top_results, 1):
+        full_text = result.get("text", "")
+        rerank_score = result.get("rerank_score", 0)
+        rrf_score = result.get("rrf_score", 0)
+        payload = result.get("payload", {})
+
+        # pages는 배열 형태로 저장됨
+        pages = payload.get("metadata", {}).get("pages", [])
+        if pages and isinstance(pages, list):
+            page_no = f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0])
+        else:
+            page_no = "N/A"
+
+        logger.info(
+            f"Reranked result {i}: rerank_score={rerank_score:.4f}, rrf_score={rrf_score:.4f}, page={page_no}\n{full_text}",
+            event='reranked_result',
+            event_type='search_analysis',
+            data={
+                "rank": i,
+                "rerank_score": rerank_score,
+                "rrf_score": rrf_score,
+                "page_no": page_no,
+                "full_text": full_text
+            }
+        )
+
     logger.info_event(
         "rerank_filtered",
         f"Reranking filtered results",
         data={
             "input_count": len(results),
             "output_count": len(filtered),
-            "threshold": RAGConfig.RERANK_THRESHOLD
+            "threshold": RAGConfig.RERANK_THRESHOLD,
+            "final_count": len(top_results)
         }
     )
-    
-    return filtered[:top_n] if filtered else reranked[:top_n]
+
+    return top_results
 
 
 async def dense_search(

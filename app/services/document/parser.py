@@ -40,11 +40,12 @@ from PIL import Image
 import nltk
 from nltk.tokenize import sent_tokenize
 
-# Config import (CUDA 설정 전에 먼저 import)
+# Config import
 from app.services.rag.config import RAGConfig
 
-# CUDA 디바이스 설정 (VLM/LLM용)
-os.environ['CUDA_VISIBLE_DEVICES'] = RAGConfig.DOCLING_CUDA_DEVICE
+# Note: CUDA_VISIBLE_DEVICES 설정 제거
+# VLM/LLM은 vLLM API를 통해 호출되므로 로컬 GPU 설정 불필요
+# 전역 CUDA_VISIBLE_DEVICES 설정은 다른 모듈(retriever 등)의 GPU 접근을 방해함
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -248,7 +249,10 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         # LLM/VLM 설정 (config 기본값 사용)
         self.llm_model = llm_model if llm_model is not None else RAGConfig.DOCLING_LLM_MODEL
         self.vision_model = vision_model if vision_model is not None else RAGConfig.DOCLING_VISION_MODEL
-        self.ollama_url = ollama_url if ollama_url is not None else RAGConfig.VLLM_URL
+        # VLM URL (이미지 description용, Port 8002)
+        self.vlm_url = ollama_url if ollama_url is not None else RAGConfig.VLM_URL
+        # LLM URL (테이블 description용, Port 8003)
+        self.llm_url = RAGConfig.FOLLOW_UP_LLM_URL
 
         # 프롬프트
         self.image_description_prompt = image_description_prompt
@@ -264,6 +268,14 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
         self.progress_callback = progress_callback
 
         self.logger = logging.getLogger(__name__)
+
+        # 고급 모드 설정 로깅
+        self.logger.info(
+            f"DoclingChunker 설정 완료: advanced_mode={self.advanced_mode}, "
+            f"enable_image_description={self.enable_image_description}, "
+            f"enable_table_description={self.enable_table_description}, "
+            f"vlm_url={self.vlm_url}, llm_url={self.llm_url}"
+        )
 
         # OCR 결과 저장용
         self.last_ocr_result = None
@@ -284,14 +296,15 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
     # ===== Docling Complete 메서드 =====
 
     def _generate_vlm_description(self, image: Image.Image) -> Optional[str]:
-        """vLLM VLM을 사용하여 이미지 description 생성"""
+        """vLLM VLM을 사용하여 이미지 description 생성 (Port 8002: Qwen VLM)"""
         try:
+            self.logger.info(f"VLM description 생성 시작: url={self.vlm_url}, model={self.vision_model}")
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
             img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
             response = requests.post(
-                f"{self.ollama_url}/v1/chat/completions",
+                f"{self.vlm_url}/v1/chat/completions",
                 json={
                     "model": self.vision_model,
                     "messages": [
@@ -340,10 +353,11 @@ If the image contains meaningful technical/scientific content (diagrams, charts,
             return None
 
     def _call_vllm_text(self, prompt: str) -> Optional[str]:
-        """vLLM 텍스트 모델 호출"""
+        """vLLM 텍스트 모델 호출 (Port 8003: GPT-OSS-20B)"""
         try:
+            self.logger.info(f"LLM text 생성 시작: url={self.llm_url}, model={self.llm_model}")
             response = requests.post(
-                f"{self.ollama_url}/v1/chat/completions",
+                f"{self.llm_url}/v1/chat/completions",
                 json={
                     "model": self.llm_model,
                     "messages": [
@@ -1621,8 +1635,15 @@ def process_pdf_to_chunks(
 
     # DoclingChunker 인스턴스 생성 (모든 옵션은 내부 기본값 사용)
     # 고급 모드만 사용자가 선택 가능
+    advanced_mode_enabled = config.enable_image_description or config.enable_table_description
+    logging.getLogger(__name__).info(
+        f"DoclingChunker 초기화: advanced_mode={advanced_mode_enabled}, "
+        f"enable_image_description={config.enable_image_description}, "
+        f"enable_table_description={config.enable_table_description}"
+    )
+
     chunker = DoclingChunker(
-        advanced_mode=(config.enable_image_description or config.enable_table_description),
+        advanced_mode=advanced_mode_enabled,
         enable_image_description=config.enable_image_description,
         enable_table_description=config.enable_table_description,
         progress_callback=progress_callback,

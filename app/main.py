@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from app.routers import pdf, chat, notebook, user, tasks, feedback, log_viewer
 from app.core.logging_config import setup_logging
 from app.middleware.request_id import RequestIDMiddleware
+from app.middleware.request_logging import RequestLoggingMiddleware
 from app.services.rag.sleep_manager import initialize_sleep_manager
 
 load_dotenv()
@@ -30,6 +31,9 @@ sleep_manager = initialize_sleep_manager(
 
 # Add Request ID middleware (BEFORE other middlewares)
 app.add_middleware(RequestIDMiddleware)
+
+# Add Request Logging middleware (logs all POST requests)
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS middleware
 app.add_middleware(
