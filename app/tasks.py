@@ -92,6 +92,7 @@ def process_pdf_task(
         config = IntegratedParserConfig(
             enable_image_description=generate_image_description,
             enable_table_description=generate_image_description,  # 임시: 같은 값 사용
+            embed_with_assets=generate_image_description,  # description 생성 시 content에도 asset 포함
         )
 
         # 디버깅: config 확인

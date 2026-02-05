@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
+import requests
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import SparseVector
@@ -133,6 +134,76 @@ class QwenReranker:
         return scores
 
 
+class vLLMReranker:
+    """
+    vLLM Reranker API Client
+
+    vLLM의 /v1/rerank 엔드포인트를 사용하여 리랭킹 수행
+    """
+
+    def __init__(self, base_url: str = "http://localhost:8005", model: str = "/model_weight"):
+        self.base_url = base_url.rstrip('/')
+        self.model = model
+        self.endpoint = f"{self.base_url}/v1/rerank"
+
+        logger.info(f"[vLLM Reranker] 초기화: {self.endpoint} (model: {self.model})")
+
+    def predict(self, pairs: List[tuple], instruction: str = None) -> List[float]:
+        """
+        CrossEncoder 호환 인터페이스
+
+        Args:
+            pairs: [(query, document), ...] 형식의 리스트
+            instruction: 태스크별 instruction (vLLM API에서는 미지원, 무시됨)
+
+        Returns:
+            각 pair에 대한 relevance score (0~1 범위)
+        """
+        if not pairs:
+            return []
+
+        # 모든 pair의 query는 동일하다고 가정 (검색 결과 리랭킹)
+        query = pairs[0][0]
+        documents = [doc for _, doc in pairs]
+
+        try:
+            response = requests.post(
+                self.endpoint,
+                json={
+                    "model": self.model,
+                    "query": query,
+                    "documents": documents
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+
+            result = response.json()
+
+            # vLLM rerank API 응답 형식:
+            # {
+            #   "results": [
+            #     {"index": 2, "relevance_score": 0.89},
+            #     {"index": 0, "relevance_score": 0.85},
+            #     ...
+            #   ]
+            # }
+
+            # 원본 순서대로 점수 배열 생성
+            scores = [0.0] * len(documents)
+            for item in result.get("results", []):
+                idx = item["index"]
+                score = item["relevance_score"]
+                scores[idx] = score
+
+            return scores
+
+        except Exception as e:
+            logger.error(f"[vLLM Reranker] API 호출 실패: {e}")
+            # 실패 시 모든 문서에 중간 점수 할당
+            return [0.5] * len(documents)
+
+
 # Qdrant 클라이언트 싱글톤
 _qdrant_client: Optional[QdrantClient] = None
 
@@ -152,26 +223,31 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def get_reranker():
-    """Reranker 모델 싱글톤 (CrossEncoder, Jina Reranker, 또는 Qwen Reranker)"""
+    """Reranker 모델 싱글톤 (vLLM, Qwen, 또는 CrossEncoder)"""
     global _reranker
 
     if _reranker is None:
         logger.info("[RERANKER] 싱글톤이 None, 새로 로딩합니다")
         reranker_type = RAGConfig.RERANKER_TYPE.lower()
 
-        if reranker_type == "qwen":
+        if reranker_type == "vllm":
+            _reranker = vLLMReranker(
+                base_url=RAGConfig.VLLM_RERANKER_URL,
+                model=RAGConfig.VLLM_RERANKER_MODEL
+            )
+        elif reranker_type == "qwen":
             if not _HAS_TRANSFORMERS:
                 logger.warning("Qwen Reranker를 사용할 수 없습니다. CrossEncoder로 폴백합니다.")
-                _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
-                logger.info(f"Reranker loaded (fallback): {RAGConfig.RERANKER_ID}")
+                _reranker = CrossEncoder(RAGConfig.CROSSENCODER_MODEL, max_length=512)
+                logger.info(f"Reranker loaded (fallback): {RAGConfig.CROSSENCODER_MODEL}")
             else:
                 _reranker = QwenReranker(
                     model_name=RAGConfig.QWEN_RERANKER_MODEL,
                     device=RAGConfig.RERANKER_DEVICE
                 )
         else:
-            _reranker = CrossEncoder(RAGConfig.RERANKER_ID, max_length=512)
-            logger.info(f"Reranker loaded: {RAGConfig.RERANKER_ID}")
+            _reranker = CrossEncoder(RAGConfig.CROSSENCODER_MODEL, max_length=512)
+            logger.info(f"Reranker loaded: {RAGConfig.CROSSENCODER_MODEL}")
     else:
         logger.info("[RERANKER] 싱글톤 재사용 (이미 로딩됨)")
 

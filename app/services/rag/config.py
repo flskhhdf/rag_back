@@ -9,12 +9,12 @@ class RAGConfig:
     """RAG 파이프라인 설정"""
     
     # Embedding
-    # Port 8004: Qwen/Qwen3-Embedding-8B (임베딩)
+    # Port 8006: /model_weight (Qwen3-Embedding-8B, vLLM)
     EMBED_TYPE = os.getenv("EMBED_TYPE", "vllm")  # "vllm", "ollama", or "huggingface"
-    EMBED_MODEL = os.getenv("EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "/model_weight")
     SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
     OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")  # For ollama embeddings
-    VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8004")  # For vLLM embeddings
+    VLLM_EMBED_URL = os.getenv("VLLM_EMBED_URL", "http://localhost:8006")  # For vLLM embeddings
     
     
     # Search
@@ -22,10 +22,20 @@ class RAGConfig:
     TOP_K_FINAL = int(os.getenv("TOP_K_FINAL", "5"))
     
     # Reranking
-    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "qwen" or "crossencoder"
-    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
+    RERANKER_TYPE = os.getenv("RERANKER_TYPE", "crossencoder")  # "vllm", "qwen", or "crossencoder"
+
+    # vLLM Reranker (Port 8005: Qwen3-Reranker-8B)
+    VLLM_RERANKER_URL = os.getenv("VLLM_RERANKER_URL", "http://localhost:8005")
+    VLLM_RERANKER_MODEL = os.getenv("VLLM_RERANKER_MODEL", "/model_weight")
+
+    # Local GPU Reranker
     QWEN_RERANKER_MODEL = os.getenv("QWEN_RERANKER_MODEL", "Qwen/Qwen3-Reranker-8B")  # For Qwen Reranker
     RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "cuda:1")  # GPU device for Reranker
+
+    # CrossEncoder Reranker
+    RERANKER_ID = os.getenv("RERANKER_ID", "BAAI/bge-reranker-v2-m3")  # For CrossEncoder
+    CROSSENCODER_MODEL = os.getenv("CROSSENCODER_MODEL", "BAAI/bge-reranker-v2-m3")
+
     RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # 필터링 임계값 (낮은 점수 제거)
 
     # Minimum Search Score (검색 결과 신뢰도 임계값)
@@ -75,6 +85,7 @@ class RAGConfig:
     CHUNK_MAX_TOKENS = int(os.getenv("CHUNK_MAX_TOKENS", "400"))
     CHUNK_MIN_TOKENS = int(os.getenv("CHUNK_MIN_TOKENS", "100"))
     CHUNK_OVERLAP_SENTENCES = int(os.getenv("CHUNK_OVERLAP_SENTENCES", "2"))
+    EMBED_WITH_ASSETS = os.getenv("EMBED_WITH_ASSETS", "false").lower() in ("true", "1", "yes")  # content에 asset 설명 appendix 추가
 
 
 # =============================================================================
